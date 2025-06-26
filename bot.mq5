@@ -304,6 +304,7 @@ void OnTick() {
    if (TimeCurrent() - lastRegularCheck > 1) { // Verificar a cada segundo
       CheckExecutionAndPlaceTP();
       PreventMultiplePositions();
+      MonitorCandlesAndAdjustExits();
       lastRegularCheck = TimeCurrent();
    }
 }
@@ -577,5 +578,160 @@ void OnDeinit(const int reason) {
    }
    
    Print("✅ Bot finalizado com sucesso");
+}
+
+void MonitorCandlesAndAdjustExits() {
+   static datetime lastProcessedCandle = 0;
+   
+   // Verificar se há posições abertas
+   bool hasBuyPosition = false;
+   bool hasSellPosition = false;
+   ulong buyTicket = 0;
+   ulong sellTicket = 0;
+   datetime buyOpenTime = 0;
+   datetime sellOpenTime = 0;
+   
+   for (int i = PositionsTotal() - 1; i >= 0; i--) {
+      if (PositionGetTicket(i) > 0) {
+         if (PositionSelectByTicket(PositionGetTicket(i))) {
+            long magic = PositionGetInteger(POSITION_MAGIC);
+            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            
+            if (magic == 123456) {
+               if (posType == POSITION_TYPE_BUY) {
+                  hasBuyPosition = true;
+                  buyTicket = PositionGetTicket(i);
+                  buyOpenTime = (datetime)PositionGetInteger(POSITION_TIME);
+               }
+               else if (posType == POSITION_TYPE_SELL) {
+                  hasSellPosition = true;
+                  sellTicket = PositionGetTicket(i);
+                  sellOpenTime = (datetime)PositionGetInteger(POSITION_TIME);
+               }
+            }
+         }
+      }
+   }
+   
+   // Se não há posições, não fazer nada
+   if (!hasBuyPosition && !hasSellPosition) {
+      return;
+   }
+   
+   // Usar sempre o candle fechado anterior ao atual (shift=1)
+   int shift = 1;
+   datetime candleStart = iTime(_Symbol, _Period, shift);
+   datetime candleEnd = candleStart + PeriodSeconds(_Period);
+   datetime currentTime = TimeCurrent();
+   
+   // Só processar se o candle está fechado
+   if (currentTime < candleEnd) {
+      return;
+   }
+   
+   // Só processar se já não processou esse candle
+   if (candleStart == lastProcessedCandle) {
+      return;
+   }
+   
+   // Só processar se a posição foi aberta antes do início desse candle
+   if ((hasBuyPosition && buyOpenTime >= candleStart) && (hasSellPosition && sellOpenTime >= candleStart)) {
+      return;
+   }
+   if (hasBuyPosition && buyOpenTime >= candleStart) {
+      return;
+   }
+   if (hasSellPosition && sellOpenTime >= candleStart) {
+      return;
+   }
+   
+   lastProcessedCandle = candleStart;
+   Print("🕐 Avaliando candle fechado: ", TimeToString(candleStart));
+   
+   // Obter dados do candle fechado
+   double candleHigh = iHigh(_Symbol, _Period, shift);
+   double candleLow = iLow(_Symbol, _Period, shift);
+   
+   // Obter as faixas de desvio
+   double openPrice = 0;
+   double dev = 0;
+   if (cache_count > 0) {
+      openPrice = cached_opens[cache_count - 1];
+      dev = cached_devs[cache_count - 1];
+   } else {
+      int dshift = iBarShift(_Symbol, PERIOD_D1, iTime(_Symbol, PERIOD_D1, 0));
+      if (dshift < 0 || dshift + nPeriod >= Bars(_Symbol, PERIOD_D1)) return;
+      double sum = 0, var = 0;
+      for (int j = 1; j <= nPeriod; j++) {
+         double h = iHigh(_Symbol, PERIOD_D1, dshift + j);
+         double l = iLow(_Symbol, PERIOD_D1, dshift + j);
+         sum += (h - l);
+      }
+      double avg = sum / nPeriod;
+      for (int j = 1; j <= nPeriod; j++) {
+         double h = iHigh(_Symbol, PERIOD_D1, dshift + j);
+         double l = iLow(_Symbol, PERIOD_D1, dshift + j);
+         var += MathPow((h - l) - avg, 2);
+      }
+      dev = MathSqrt(var / nPeriod);
+      openPrice = iOpen(_Symbol, PERIOD_D1, dshift);
+   }
+   double dev_plus_1 = RoundToNearestHalf(openPrice + dev);
+   double dev_minus_1 = RoundToNearestHalf(openPrice - dev);
+   Print("📊 Candle - H:", DoubleToString(candleHigh, _Digits), " L:", DoubleToString(candleLow, _Digits), 
+         " Dev+1:", DoubleToString(dev_plus_1, _Digits), " Dev-1:", DoubleToString(dev_minus_1, _Digits));
+   
+   // Lógica para posição SELL
+   if (hasSellPosition && sellOpenTime < candleStart) {
+      double currentSL = 0;
+      double currentTP = 0;
+      if (PositionSelectByTicket(sellTicket)) {
+         currentSL = PositionGetDouble(POSITION_SL);
+         currentTP = PositionGetDouble(POSITION_TP);
+      }
+      if (candleHigh < dev_plus_1) {
+         Print("🎯 SELL: High < Dev+1 - Colocando STOP em ", DoubleToString(dev_plus_1, _Digits));
+         double newTP = (currentTP > 0) ? currentTP : 0;
+         if (trade.PositionModify(sellTicket, dev_plus_1, newTP)) {
+            Print("✅ Stop SELL colocado");
+         } else {
+            Print("❌ Erro stop SELL: ", GetLastError());
+         }
+      } else if (candleLow > dev_plus_1) {
+         Print("🎯 SELL: Low > Dev+1 - Movendo TP para ", DoubleToString(dev_plus_1, _Digits));
+         double newSL = (currentSL > 0) ? currentSL : 0;
+         if (trade.PositionModify(sellTicket, newSL, dev_plus_1)) {
+            Print("✅ TP SELL movido");
+         } else {
+            Print("❌ Erro TP SELL: ", GetLastError());
+         }
+      }
+   }
+   // Lógica para posição BUY
+   if (hasBuyPosition && buyOpenTime < candleStart) {
+      double currentSL = 0;
+      double currentTP = 0;
+      if (PositionSelectByTicket(buyTicket)) {
+         currentSL = PositionGetDouble(POSITION_SL);
+         currentTP = PositionGetDouble(POSITION_TP);
+      }
+      if (candleLow > dev_minus_1) {
+         Print("🎯 BUY: Low > Dev-1 - Colocando STOP em ", DoubleToString(dev_minus_1, _Digits));
+         double newTP = (currentTP > 0) ? currentTP : 0;
+         if (trade.PositionModify(buyTicket, dev_minus_1, newTP)) {
+            Print("✅ Stop BUY colocado");
+         } else {
+            Print("❌ Erro stop BUY: ", GetLastError());
+         }
+      } else if (candleHigh < dev_minus_1) {
+         Print("🎯 BUY: High < Dev-1 - Movendo TP para ", DoubleToString(dev_minus_1, _Digits));
+         double newSL = (currentSL > 0) ? currentSL : 0;
+         if (trade.PositionModify(buyTicket, newSL, dev_minus_1)) {
+            Print("✅ TP BUY movido");
+         } else {
+            Print("❌ Erro TP BUY: ", GetLastError());
+         }
+      }
+   }
 }
 
