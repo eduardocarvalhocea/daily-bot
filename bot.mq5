@@ -1,76 +1,40 @@
 #include <Trade\Trade.mqh>
 
-input int nPeriod = 45;
-input double lotSize = 1.0;
-input datetime startDate = D'2024.01.01 00:00';
+input int             nPeriod    = 45;
+input double          lotSize    = 1.0;
+input ENUM_TIMEFRAMES tradingTF  = PERIOD_M5;
+input int             emaPeriod  = 20;
+input int             startHour  = 9;
+input int             startMin   = 0;
+input int             endHour    = 17;
+input int             endMin     = 30;
+input datetime        startDate  = D'2024.01.01 00:00';
 
 CTrade trade;
 
-datetime lastDay = 0;
+datetime lastDay      = 0;
+double   lastEMA      = 0;
+double   g_dev        = 0;
+double   g_open       = 0;
+double   g_devMinus1  = 0;
+double   g_devPlus1   = 0;
+double   g_devMinus2  = 0;
+double   g_devPlus2   = 0;
 
 #define MAX_CACHE 5000
 datetime cached_dates[MAX_CACHE];
-double cached_devs[MAX_CACHE];
-double cached_opens[MAX_CACHE];
-int cache_count = 0;
+double   cached_devs[MAX_CACHE];
+double   cached_opens[MAX_CACHE];
+int      cache_count = 0;
 
 double RoundToNearestHalf(double value) {
    return MathRound(value * 2.0) / 2.0;
 }
 
-int OnInit() {
-   if(MQLInfoInteger(MQL_PROGRAM_TYPE) != PROGRAM_EXPERT) {
-      Print("❌ Este código deve ser executado como Expert Advisor, não como indicador!");
-      return INIT_FAILED;
-   }
-   
-   trade.SetExpertMagicNumber(123456);
-   trade.SetDeviationInPoints(10);
-   trade.SetTypeFilling(ORDER_FILLING_FOK);
-   
-   if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) {
-      Print("❌ Trading automático não está habilitado!");
-      return INIT_FAILED;
-   }
-   
-   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) {
-      Print("❌ Trading não está habilitado no terminal!");
-      return INIT_FAILED;
-   }
-   
-   if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED)) {
-      Print("❌ Trading não está habilitado na conta!");
-      return INIT_FAILED;
-   }
-   
-   if(!AccountInfoInteger(ACCOUNT_TRADE_EXPERT)) {
-      Print("❌ Trading de Expert Advisors não está habilitado!");
-      return INIT_FAILED;
-   }
-   
-   Print("✅ Configurações de trading verificadas com sucesso!");
-   Print("💰 Saldo da conta: ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2));
-   Print("📊 Margem livre: ", DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_FREE), 2));
-   
-   if(MQLInfoInteger(MQL_TESTER)) {
-      Print("🧪 Executando em modo BACKTEST");
-   } else {
-      Print("🌐 Executando em tempo REAL");
-   }
-   
-   datetime currentDay = iTime(_Symbol, PERIOD_D1, 0);
-   Print("📅 Dia atual: ", TimeToString(currentDay));
-   
-   Sleep(2000);
-   ProcessNewDay(currentDay);
-   
-   return INIT_SUCCEEDED;
-}
-
 bool GetDailyStats(datetime day, double &dev, double &open) {
    for (int i = 0; i < cache_count; i++) {
       if (cached_dates[i] == day) {
-         dev = cached_devs[i];
+         dev  = cached_devs[i];
          open = cached_opens[i];
          return true;
       }
@@ -85,7 +49,6 @@ bool GetDailyStats(datetime day, double &dev, double &open) {
       double l = iLow(_Symbol, PERIOD_D1, shift + j);
       sum += (h - l);
    }
-
    double avg = sum / nPeriod;
    for (int j = 1; j <= nPeriod; j++) {
       double h = iHigh(_Symbol, PERIOD_D1, shift + j);
@@ -93,12 +56,12 @@ bool GetDailyStats(datetime day, double &dev, double &open) {
       var += MathPow((h - l) - avg, 2);
    }
 
-   dev = MathSqrt(var / nPeriod);
+   dev  = MathSqrt(var / nPeriod);
    open = iOpen(_Symbol, PERIOD_D1, shift);
 
    if (cache_count < MAX_CACHE) {
       cached_dates[cache_count] = day;
-      cached_devs[cache_count] = dev;
+      cached_devs[cache_count]  = dev;
       cached_opens[cache_count] = open;
       cache_count++;
    }
@@ -106,632 +69,228 @@ bool GetDailyStats(datetime day, double &dev, double &open) {
    return true;
 }
 
-void PlacePendingOrder(int orderType, double volume, double price, string comment) {
-   if(!MQLInfoInteger(MQL_TRADE_ALLOWED) || !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) {
-      Print("❌ Trading não está habilitado - pulando ordem ", comment);
-      return;
-   }
-   
-   double margin = 0;
-   if(!OrderCalcMargin((ENUM_ORDER_TYPE)orderType, _Symbol, volume, price, margin)) {
-      Print("❌ Erro ao calcular margem para ordem ", comment);
-      return;
-   }
-   
-   double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
-   if(margin > freeMargin) {
-      Print("❌ Margem insuficiente para ordem ", comment, ". Necessário: ", DoubleToString(margin, 2), 
-            ", Disponível: ", DoubleToString(freeMargin, 2));
-      return;
-   }
-   
-   double sl = 0, tp = 0;
-
-   double stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double spread = ask - bid;
-
-   if (orderType == ORDER_TYPE_BUY_LIMIT) {
-      if (price >= bid - stopLevel)
-         price = bid - stopLevel - spread - 5 * _Point;
-   }
-   else if (orderType == ORDER_TYPE_SELL_LIMIT) {
-      if (price <= ask + stopLevel)
-         price = ask + stopLevel + spread + 5 * _Point;
-   }
-
-   Print("📋 Tentando ordem ", comment, ": tipo=", orderType, ", preço=", DoubleToString(price, _Digits), 
-         ", bid=", DoubleToString(bid, _Digits), ", ask=", DoubleToString(ask, _Digits),
-         ", margem=", DoubleToString(margin, 2));
-
-   bool success = false;
-   int retryCount = 0;
-   const int maxRetries = 3;
-   
-   while (!success && retryCount < maxRetries) {
-      if (orderType == ORDER_TYPE_BUY_LIMIT)
-         success = trade.BuyLimit(volume, price, _Symbol, sl, tp, ORDER_TIME_GTC);
-      else if (orderType == ORDER_TYPE_SELL_LIMIT)
-         success = trade.SellLimit(volume, price, _Symbol, sl, tp, ORDER_TIME_GTC);
-      
-      if (!success) {
-         int error = GetLastError();
-         Print("❌ Tentativa ", retryCount + 1, " falhou para ordem ", comment, ". Código: ", error);
-         
-         if (error == 130 || error == 131 || error == 138) {
-            if (orderType == ORDER_TYPE_BUY_LIMIT)
-               price -= 10 * _Point;
-            else
-               price += 10 * _Point;
-         }
-         
-         retryCount++;
-         Sleep(100);
-      }
-   }
-   
-   if (success) {
-      Print("✅ Ordem ", comment, " colocada com sucesso! Ticket: ", trade.ResultOrder());
-   } else {
-      Print("❌ Falha definitiva ao colocar ordem ", comment, " após ", maxRetries, " tentativas");
-   }
+double GetEMA() {
+   int handle = iMA(_Symbol, tradingTF, emaPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   if (handle == INVALID_HANDLE) return 0;
+   double buf[1];
+   if (CopyBuffer(handle, 0, 0, 1, buf) < 1) return 0;
+   IndicatorRelease(handle);
+   return buf[0];
 }
 
-void CancelAllOrders() {
-   Print("🗑️ Verificando ordens para cancelamento - Total: ", OrdersTotal());
-   
-   for (int i = OrdersTotal() - 1; i >= 0; i--) {
-      ulong ticket = OrderGetTicket(i);
-      if (OrderSelect(ticket)) {
-         long magic = OrderGetInteger(ORDER_MAGIC);
-         
-         Print("   Ordem ", i, ": Ticket=", ticket, ", Magic=", magic);
-         
-         // Cancelar apenas ordens com magic 123456
-         if (magic == 123456) {
-            Print("   🎯 Cancelando ordem com magic 123456");
-            if (trade.OrderDelete(ticket)) {
-               Print("🗑️ Ordem pendente cancelada com sucesso");
-            } else {
-               Print("❌ Erro ao cancelar ordem - Erro: ", GetLastError());
-            }
-         } else {
-            Print("   ⏭️ Pulando ordem (magic diferente): Magic=", magic);
-         }
-      }
-   }
-}
-
-void CloseAllPositions() {
-   Print("🕐 Fechando todas as posições - horário limite atingido (22:30)");
-   
-   for (int i = PositionsTotal() - 1; i >= 0; i--) {
-      if (PositionGetTicket(i) > 0) {
-         if (PositionSelectByTicket(PositionGetTicket(i))) {
-            long magic = PositionGetInteger(POSITION_MAGIC);
-            
-            if (magic == 123456) {
-               ulong ticket = PositionGetTicket(i);
-               ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-               
-               Print("🗑️ Fechando posição: ", (posType == POSITION_TYPE_BUY ? "BUY" : "SELL"), " - Ticket: ", ticket);
-               
-               if (trade.PositionClose(ticket)) {
-                  Print("✅ Posição fechada com sucesso");
-               } else {
-                  Print("❌ Erro ao fechar posição: ", GetLastError());
-               }
-            }
-         }
-      }
-   }
-   
-   // Cancelar todas as ordens pendentes também
-   CancelAllOrders();
-}
-
-bool IsTimeToCloseOperations() {
+bool IsWithinTradingHours() {
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
-   
-   // Verificar se é depois das 22:30
-   if (dt.hour > 22 || (dt.hour == 22 && dt.min >= 30)) {
-      return true;
+   int nowMins   = dt.hour * 60 + dt.min;
+   int startMins = startHour * 60 + startMin;
+   int endMins   = endHour * 60 + endMin;
+   return (nowMins >= startMins && nowMins < endMins);
+}
+
+bool IsAfterEndTime() {
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   int nowMins = dt.hour * 60 + dt.min;
+   int endMins = endHour * 60 + endMin;
+   return (nowMins >= endMins);
+}
+
+void CloseAll() {
+   for (int i = PositionsTotal() - 1; i >= 0; i--) {
+      ulong ticket = PositionGetTicket(i);
+      if (ticket > 0 && PositionSelectByTicket(ticket)) {
+         if (PositionGetInteger(POSITION_MAGIC) == 123456) {
+            if (!trade.PositionClose(ticket))
+               Print("Error closing position ", ticket, ": ", GetLastError());
+         }
+      }
    }
-   
-   return false;
+   for (int i = OrdersTotal() - 1; i >= 0; i--) {
+      ulong ticket = OrderGetTicket(i);
+      if (OrderSelect(ticket) && OrderGetInteger(ORDER_MAGIC) == 123456) {
+         if (!trade.OrderDelete(ticket))
+            Print("Error deleting order ", ticket, ": ", GetLastError());
+      }
+   }
+}
+
+void ProcessNewDay() {
+   datetime day = iTime(_Symbol, PERIOD_D1, 0);
+   Print("New day: ", TimeToString(day));
+
+   // Skip if already have an open position
+   for (int i = PositionsTotal() - 1; i >= 0; i--) {
+      ulong ticket = PositionGetTicket(i);
+      if (ticket > 0 && PositionSelectByTicket(ticket)) {
+         if (PositionGetInteger(POSITION_MAGIC) == 123456) {
+            Print("Position already open, skipping new day orders");
+            return;
+         }
+      }
+   }
+
+   // Cancel any leftover pending orders
+   CloseAll();
+
+   double dev, o;
+   if (!GetDailyStats(day, dev, o)) {
+      Print("GetDailyStats failed for ", TimeToString(day));
+      return;
+   }
+
+   g_dev      = dev;
+   g_open     = o;
+   g_devMinus1 = RoundToNearestHalf(o - dev);
+   g_devPlus1  = RoundToNearestHalf(o + dev);
+   g_devMinus2 = RoundToNearestHalf(o - 2 * dev);
+   g_devPlus2  = RoundToNearestHalf(o + 2 * dev);
+
+   double ema = GetEMA();
+   Print("Open=", o, " Dev=", dev, " EMA=", ema,
+         " BuyLimit=", g_devMinus1, " SellLimit=", g_devPlus1);
+
+   if (ema > g_devMinus1) {
+      if (trade.BuyLimit(lotSize, g_devMinus1, _Symbol, g_devMinus2, ema, ORDER_TIME_DAY))
+         Print("BuyLimit placed at ", g_devMinus1, " SL=", g_devMinus2, " TP=", ema);
+      else
+         Print("BuyLimit failed: ", GetLastError());
+   } else {
+      Print("BuyLimit skipped: EMA (", ema, ") <= devMinus1 (", g_devMinus1, ")");
+   }
+
+   if (ema < g_devPlus1) {
+      if (trade.SellLimit(lotSize, g_devPlus1, _Symbol, g_devPlus2, ema, ORDER_TIME_DAY))
+         Print("SellLimit placed at ", g_devPlus1, " SL=", g_devPlus2, " TP=", ema);
+      else
+         Print("SellLimit failed: ", GetLastError());
+   } else {
+      Print("SellLimit skipped: EMA (", ema, ") >= devPlus1 (", g_devPlus1, ")");
+   }
+}
+
+int OnInit() {
+   trade.SetExpertMagicNumber(123456);
+   trade.SetDeviationInPoints(10);
+   trade.SetTypeFilling(ORDER_FILLING_FOK);
+
+   if (!MQLInfoInteger(MQL_TRADE_ALLOWED)) {
+      Print("Automated trading not enabled");
+      return INIT_FAILED;
+   }
+
+   lastDay = iTime(_Symbol, PERIOD_D1, 0);
+   return INIT_SUCCEEDED;
 }
 
 void OnTick() {
-   static datetime lastProcessedDay = 0;
-   static int lastOrdersCount = 0;
-   static int lastPositionsCount = 0;
-   static bool dailyCloseExecuted = false;
-   
+   if (TimeCurrent() < startDate) return;
+
+   // Close all and stop after endTime
+   if (IsAfterEndTime()) {
+      static datetime lastCloseDay = 0;
+      datetime today = iTime(_Symbol, PERIOD_D1, 0);
+      if (lastCloseDay != today) {
+         Print("End time reached, closing all");
+         CloseAll();
+         lastCloseDay = today;
+      }
+      return;
+   }
+
+   // Wait until startTime
+   if (!IsWithinTradingHours()) return;
+
+   // Detect new day
    datetime currentDay = iTime(_Symbol, PERIOD_D1, 0);
-   
-   // Verificar se é hora de fechar operações (22:30)
-   if (IsTimeToCloseOperations() && !dailyCloseExecuted) {
-      Print("🕐 Horário limite atingido (22:30) - fechando todas as operações");
-      CloseAllPositions();
-      dailyCloseExecuted = true;
-      return; // Não executar mais nada neste tick
-   }
-   
-   // Resetar flag de fechamento diário quando passar para o próximo dia
-   if (currentDay != lastProcessedDay) {
-      Print("🔄 Novo dia detectado: ", TimeToString(currentDay));
-      lastProcessedDay = currentDay;
-      dailyCloseExecuted = false; // Resetar flag para novo dia
-      Sleep(1000);
-      ProcessNewDay(currentDay);
-   }
-   
-   // Se já executou o fechamento diário, não fazer mais nada
-   if (dailyCloseExecuted) {
+   if (currentDay != lastDay) {
+      lastDay = currentDay;
+      lastEMA = 0;
+      ProcessNewDay();
       return;
    }
-   
-   // Verificar mudanças nas ordens e posições
-   int currentOrdersCount = OrdersTotal();
-   int currentPositionsCount = PositionsTotal();
-   
-   // Se o número de ordens diminuiu ou posições aumentou, pode ter havido execução
-   if (currentOrdersCount < lastOrdersCount || currentPositionsCount > lastPositionsCount) {
-      Print("🔄 Mudança detectada - Ordens: ", lastOrdersCount, "->", currentOrdersCount, 
-            " | Posições: ", lastPositionsCount, "->", currentPositionsCount);
-      
-      // Aguardar um pouco para garantir que a execução foi processada
-      Sleep(200);
-      
-      Print("🎯 Chamando CheckExecutionAndPlaceTP após mudança detectada");
-      // Verificar execução e colocar TP
-      CheckExecutionAndPlaceTP();
-      
-      // Forçar verificação adicional após um delay
-      Sleep(500);
-      Print("🔄 Verificação adicional após delay");
-      CheckExecutionAndPlaceTP();
-   }
-   
-   // Atualizar contadores
-   lastOrdersCount = currentOrdersCount;
-   lastPositionsCount = currentPositionsCount;
-   
-   // Verificações regulares (a cada tick)
-   static datetime lastRegularCheck = 0;
-   if (TimeCurrent() - lastRegularCheck > 1) { // Verificar a cada segundo
-      CheckExecutionAndPlaceTP();
-      PreventMultiplePositions();
-      MonitorCandlesAndAdjustExits();
-      lastRegularCheck = TimeCurrent();
-   }
-}
 
-void CheckExecutionAndPlaceTP() {
-   static bool tpPlaced = false;
-   static datetime lastCheck = 0;
-   
-   Print("🔍 CheckExecutionAndPlaceTP chamada - tpPlaced=", tpPlaced);
-   
-   // Verificar se há posições abertas
-   bool hasBuyPosition = false;
-   bool hasSellPosition = false;
-   double buyVolume = 0;
-   double sellVolume = 0;
-   ulong buyTicket = 0;
+   // Detect newly executed orders: cancel opposite pending, set SL/TP
+   static int lastPendingCount = -1;
+   int pendingCount = 0;
+   for (int i = OrdersTotal() - 1; i >= 0; i--) {
+      ulong ticket = OrderGetTicket(i);
+      if (OrderSelect(ticket) && OrderGetInteger(ORDER_MAGIC) == 123456)
+         pendingCount++;
+   }
+
+   bool hasBuy  = false;
+   bool hasSell = false;
+   ulong buyTicket  = 0;
    ulong sellTicket = 0;
-   
-   Print("🔍 Verificando posições - Total: ", PositionsTotal());
-   
-   for (int i = PositionsTotal() - 1; i >= 0; i--) {
-      if (PositionGetTicket(i) > 0) {
-         if (PositionSelectByTicket(PositionGetTicket(i))) {
-            long magic = PositionGetInteger(POSITION_MAGIC);
-            double vol = PositionGetDouble(POSITION_VOLUME);
-            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-            ulong ticket = PositionGetTicket(i);
-            
-            Print("   Posição ", i, ": Tipo=", (posType == POSITION_TYPE_BUY ? "BUY" : "SELL"), 
-                  ", Volume=", vol, ", Magic=", magic, ", Ticket=", ticket);
-            
-            // Verificação por magic number (123456 é o magic do bot)
-            if (magic == 123456) {
-               if (posType == POSITION_TYPE_BUY) {
-                  hasBuyPosition = true;
-                  buyVolume = vol;
-                  buyTicket = ticket;
-                  Print("   ✅ Detectada posição BUY por magic number");
-               }
-               else if (posType == POSITION_TYPE_SELL) {
-                  hasSellPosition = true;
-                  sellVolume = vol;
-                  sellTicket = ticket;
-                  Print("   ✅ Detectada posição SELL por magic number");
-               }
-            }
-            else {
-               Print("   ❌ Magic number não reconhecido: ", magic);
-            }
-         }
-      }
-   }
-   
-   Print("🎯 Status: hasBuyPosition=", hasBuyPosition, ", hasSellPosition=", hasSellPosition, ", tpPlaced=", tpPlaced);
-   
-   // Se tem posições e ainda não colocou TP
-   if ((hasBuyPosition || hasSellPosition) && !tpPlaced) {
-      Print("🎯 Posição detectada - Cancelando ordens pendentes e colocando TP");
-      Print("   BUY: ", hasBuyPosition ? "SIM" : "NÃO", " | SELL: ", hasSellPosition ? "SIM" : "NÃO");
-      
-      // Cancelar todas as ordens DEV1 pendentes
-      CancelAllOrders();
-      Sleep(500);
-      
-      // Colocar take profit para cada posição modificando a posição existente
-      if (hasBuyPosition) {
-         double open_price = 0;
-         if (cache_count > 0) {
-            open_price = RoundToNearestHalf(cached_opens[cache_count - 1]);
-         } else {
-            open_price = RoundToNearestHalf(iOpen(_Symbol, PERIOD_D1, 0));
-         }
-         
-         Print("🎯 Colocando TP para posição BUY em: ", DoubleToString(open_price, _Digits));
-         // Modificar a posição existente para adicionar take profit
-         if (trade.PositionModify(buyTicket, 0, open_price)) {
-            Print("✅ Take profit para BUY colocado com sucesso!");
-         } else {
-            Print("❌ Erro ao colocar TP para BUY: ", GetLastError());
-         }
-      }
-      
-      if (hasSellPosition) {
-         double open_price = 0;
-         if (cache_count > 0) {
-            open_price = RoundToNearestHalf(cached_opens[cache_count - 1]);
-         } else {
-            open_price = RoundToNearestHalf(iOpen(_Symbol, PERIOD_D1, 0));
-         }
-         
-         Print("🎯 Colocando TP para posição SELL em: ", DoubleToString(open_price, _Digits));
-         // Modificar a posição existente para adicionar take profit
-         if (trade.PositionModify(sellTicket, 0, open_price)) {
-            Print("✅ Take profit para SELL colocado com sucesso!");
-         } else {
-            Print("❌ Erro ao colocar TP para SELL: ", GetLastError());
-         }
-      }
-      
-      tpPlaced = true;
-      lastCheck = TimeCurrent();
-      Print("✅ tpPlaced definido como TRUE");
-   } else {
-      if (hasBuyPosition || hasSellPosition) {
-         Print("⚠️ Posições detectadas mas tpPlaced já é TRUE - não colocando TP novamente");
-      } else {
-         Print("ℹ️ Nenhuma posição detectada");
-      }
-   }
-   
-   // Resetar flag quando não há posições
-   if (!hasBuyPosition && !hasSellPosition) {
-      if (tpPlaced) {
-         Print("🔄 Resetando tpPlaced para FALSE (não há posições)");
-      }
-      tpPlaced = false;
-   }
-   
-   // Verificar se há ordens pendentes quando não deveria ter
-   if (hasBuyPosition || hasSellPosition) {
-      int pendingOrders = 0;
-      for (int i = OrdersTotal() - 1; i >= 0; i--) {
-         ulong ticket = OrderGetTicket(i);
-         if (OrderSelect(ticket)) {
-            long magic = OrderGetInteger(ORDER_MAGIC);
-            if (magic == 123456) {
-               pendingOrders++;
-            }
-         }
-      }
-      
-      if (pendingOrders > 0) {
-         Print("⚠️ Detectadas ", pendingOrders, " ordens pendentes quando deveria ter posição - cancelando");
-         CancelAllOrders();
-         Sleep(500);
-      }
-   }
-}
 
-void ProcessNewDay(datetime day) {
-   Print("📅 Processando novo dia: ", TimeToString(day));
-   
-   // Verificar se já tem posições abertas
-   bool hasPositions = false;
    for (int i = PositionsTotal() - 1; i >= 0; i--) {
-      if (PositionGetTicket(i) > 0) {
-         if (PositionSelectByTicket(PositionGetTicket(i))) {
-            long magic = PositionGetInteger(POSITION_MAGIC);
-            if (magic == 123456) {
-               hasPositions = true;
-               break;
+      ulong ticket = PositionGetTicket(i);
+      if (ticket > 0 && PositionSelectByTicket(ticket)) {
+         if (PositionGetInteger(POSITION_MAGIC) == 123456) {
+            if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) {
+               hasBuy     = true;
+               buyTicket  = ticket;
+            } else {
+               hasSell    = true;
+               sellTicket = ticket;
             }
          }
       }
    }
-   
-   // Se tem posições, não colocar novas ordens
-   if (hasPositions) {
-      Print("⚠️ Posições já existem - não colocando novas ordens");
-      return;
-   }
-   
-   // Cancelar TODAS as ordens antes de colocar novas
-   CancelAllOrders();
-   Sleep(500); // Aguardar cancelamento
-   
-   double dev, o;
-   if (GetDailyStats(day, dev, o)) {
-      Print("📊 Estatísticas do dia: Open=", DoubleToString(o, _Digits), ", Dev=", DoubleToString(dev, _Digits));
-      
-      double openD = RoundToNearestHalf(o);
-      double dev_plus_1 = RoundToNearestHalf(o + dev);
-      double dev_minus_1 = RoundToNearestHalf(o - dev);
-      double dev_plus_2 = RoundToNearestHalf(o + 2 * dev);
-      double dev_minus_2 = RoundToNearestHalf(o - 2 * dev);
-      double dev_plus_3 = RoundToNearestHalf(o + 3 * dev);
-      double dev_minus_3 = RoundToNearestHalf(o - 3 * dev);
-      double dev_plus_4 = RoundToNearestHalf(o + 4 * dev);
-      double dev_minus_4 = RoundToNearestHalf(o - 4 * dev);
-      
-      Print("📈 Faixas calculadas:");
-      Print("   OpenD: ", DoubleToString(openD, _Digits));
-      Print("   Dev+1: ", DoubleToString(dev_plus_1, _Digits), " | Dev-1: ", DoubleToString(dev_minus_1, _Digits));
-      Print("   Dev+2: ", DoubleToString(dev_plus_2, _Digits), " | Dev-2: ", DoubleToString(dev_minus_2, _Digits));
-      Print("   Dev+3: ", DoubleToString(dev_plus_3, _Digits), " | Dev-3: ", DoubleToString(dev_minus_3, _Digits));
-      Print("   Dev+4: ", DoubleToString(dev_plus_4, _Digits), " | Dev-4: ", DoubleToString(dev_minus_4, _Digits));
-      
-      PlacePendingOrder(ORDER_TYPE_BUY_LIMIT, lotSize, dev_minus_1, "BUY_DEV1");
-      PlacePendingOrder(ORDER_TYPE_SELL_LIMIT, lotSize, dev_plus_1, "SELL_DEV1");
-   } else {
-      Print("❌ Erro ao obter estatísticas do dia: ", TimeToString(day));
-   }
-}
 
-void PreventMultiplePositions() {
-   int buyCount = 0;
-   int sellCount = 0;
-   
-   // Contar posições existentes
-   for (int i = PositionsTotal() - 1; i >= 0; i--) {
-      if (PositionGetTicket(i) > 0) {
-         if (PositionSelectByTicket(PositionGetTicket(i))) {
-            long magic = PositionGetInteger(POSITION_MAGIC);
-            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-            
-            if (magic == 123456) {
-               if (posType == POSITION_TYPE_BUY) {
-                  buyCount++;
-               }
-               else if (posType == POSITION_TYPE_SELL) {
-                  sellCount++;
-               }
+   // When a new position appears and pending orders still exist, cancel opposite
+   if (lastPendingCount > pendingCount && (hasBuy || hasSell)) {
+      double ema = GetEMA();
+      if (hasBuy) {
+         // Cancel any remaining sell limit
+         for (int i = OrdersTotal() - 1; i >= 0; i--) {
+            ulong t = OrderGetTicket(i);
+            if (OrderSelect(t) && OrderGetInteger(ORDER_MAGIC) == 123456 &&
+                OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_SELL_LIMIT) {
+               trade.OrderDelete(t);
+               Print("Cancelled SellLimit after BUY execution");
             }
+         }
+         if (ema > 0) {
+            trade.PositionModify(buyTicket, g_devMinus2, ema);
+            Print("BUY executed: SL=", g_devMinus2, " TP=", ema);
+         }
+      }
+      if (hasSell) {
+         // Cancel any remaining buy limit
+         for (int i = OrdersTotal() - 1; i >= 0; i--) {
+            ulong t = OrderGetTicket(i);
+            if (OrderSelect(t) && OrderGetInteger(ORDER_MAGIC) == 123456 &&
+                OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_BUY_LIMIT) {
+               trade.OrderDelete(t);
+               Print("Cancelled BuyLimit after SELL execution");
+            }
+         }
+         if (ema > 0) {
+            trade.PositionModify(sellTicket, g_devPlus2, ema);
+            Print("SELL executed: SL=", g_devPlus2, " TP=", ema);
          }
       }
    }
-   
-   // Se tem múltiplas posições do mesmo tipo, fechar as extras
-   if (buyCount > 1) {
-      Print("⚠️ Detectadas ", buyCount, " posições BUY - fechando extras");
-      CloseExtraPositions(POSITION_TYPE_BUY, buyCount - 1);
-   }
-   
-   if (sellCount > 1) {
-      Print("⚠️ Detectadas ", sellCount, " posições SELL - fechando extras");
-      CloseExtraPositions(POSITION_TYPE_SELL, sellCount - 1);
-   }
-}
+   lastPendingCount = pendingCount;
 
-void CloseExtraPositions(ENUM_POSITION_TYPE positionType, int countToClose) {
-   int closed = 0;
-   
-   for (int i = PositionsTotal() - 1; i >= 0 && closed < countToClose; i--) {
-      if (PositionGetTicket(i) > 0) {
-         if (PositionSelectByTicket(PositionGetTicket(i))) {
-            long magic = PositionGetInteger(POSITION_MAGIC);
-            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-            
-            if (magic == 123456 && posType == positionType) {
-               ulong ticket = PositionGetTicket(i);
-               if (trade.PositionClose(ticket)) {
-                  Print("🗑️ Posição extra fechada: ", (positionType == POSITION_TYPE_BUY ? "BUY" : "SELL"));
-                  closed++;
-               }
-            }
+   // Track EMA in real-time and update TP
+   if (hasBuy || hasSell) {
+      double ema = GetEMA();
+      if (ema > 0 && MathAbs(ema - lastEMA) > _Point) {
+         if (hasBuy) {
+            double sl = PositionSelectByTicket(buyTicket) ? PositionGetDouble(POSITION_SL) : g_devMinus2;
+            trade.PositionModify(buyTicket, sl, ema);
          }
+         if (hasSell) {
+            double sl = PositionSelectByTicket(sellTicket) ? PositionGetDouble(POSITION_SL) : g_devPlus2;
+            trade.PositionModify(sellTicket, sl, ema);
+         }
+         lastEMA = ema;
       }
    }
 }
 
 void OnDeinit(const int reason) {
-   Print("🛑 Bot sendo finalizado - Razão: ", reason);
-   
-   // Verificar se há posições abertas e colocar TP se necessário
-   bool hasPositions = false;
-   for (int i = PositionsTotal() - 1; i >= 0; i--) {
-      if (PositionGetTicket(i) > 0) {
-         if (PositionSelectByTicket(PositionGetTicket(i))) {
-            long magic = PositionGetInteger(POSITION_MAGIC);
-            if (magic == 123456) {
-               hasPositions = true;
-               break;
-            }
-         }
-      }
-   }
-   
-   if (hasPositions) {
-      Print("⚠️ Posições abertas detectadas no OnDeinit - colocando TP");
-      CheckExecutionAndPlaceTP();
-   }
-   
-   Print("✅ Bot finalizado com sucesso");
+   Print("Bot stopped, reason=", reason);
 }
-
-void MonitorCandlesAndAdjustExits() {
-   static datetime lastProcessedCandle = 0;
-   
-   // Verificar se há posições abertas
-   bool hasBuyPosition = false;
-   bool hasSellPosition = false;
-   ulong buyTicket = 0;
-   ulong sellTicket = 0;
-   datetime buyOpenTime = 0;
-   datetime sellOpenTime = 0;
-   
-   for (int i = PositionsTotal() - 1; i >= 0; i--) {
-      if (PositionGetTicket(i) > 0) {
-         if (PositionSelectByTicket(PositionGetTicket(i))) {
-            long magic = PositionGetInteger(POSITION_MAGIC);
-            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-            
-            if (magic == 123456) {
-               if (posType == POSITION_TYPE_BUY) {
-                  hasBuyPosition = true;
-                  buyTicket = PositionGetTicket(i);
-                  buyOpenTime = (datetime)PositionGetInteger(POSITION_TIME);
-               }
-               else if (posType == POSITION_TYPE_SELL) {
-                  hasSellPosition = true;
-                  sellTicket = PositionGetTicket(i);
-                  sellOpenTime = (datetime)PositionGetInteger(POSITION_TIME);
-               }
-            }
-         }
-      }
-   }
-   
-   // Se não há posições, não fazer nada
-   if (!hasBuyPosition && !hasSellPosition) {
-      return;
-   }
-   
-   // Usar sempre o candle fechado anterior ao atual (shift=1)
-   int shift = 1;
-   datetime candleStart = iTime(_Symbol, _Period, shift);
-   datetime candleEnd = candleStart + PeriodSeconds(_Period);
-   datetime currentTime = TimeCurrent();
-   
-   // Só processar se o candle está fechado
-   if (currentTime < candleEnd) {
-      return;
-   }
-   
-   // Só processar se já não processou esse candle
-   if (candleStart == lastProcessedCandle) {
-      return;
-   }
-   
-   // Só processar se a posição foi aberta antes do início desse candle
-   if ((hasBuyPosition && buyOpenTime >= candleStart) && (hasSellPosition && sellOpenTime >= candleStart)) {
-      return;
-   }
-   if (hasBuyPosition && buyOpenTime >= candleStart) {
-      return;
-   }
-   if (hasSellPosition && sellOpenTime >= candleStart) {
-      return;
-   }
-   
-   lastProcessedCandle = candleStart;
-   Print("🕐 Avaliando candle fechado: ", TimeToString(candleStart));
-   
-   // Obter dados do candle fechado
-   double candleHigh = iHigh(_Symbol, _Period, shift);
-   double candleLow = iLow(_Symbol, _Period, shift);
-   
-   // Obter as faixas de desvio
-   double openPrice = 0;
-   double dev = 0;
-   if (cache_count > 0) {
-      openPrice = cached_opens[cache_count - 1];
-      dev = cached_devs[cache_count - 1];
-   } else {
-      int dshift = iBarShift(_Symbol, PERIOD_D1, iTime(_Symbol, PERIOD_D1, 0));
-      if (dshift < 0 || dshift + nPeriod >= Bars(_Symbol, PERIOD_D1)) return;
-      double sum = 0, var = 0;
-      for (int j = 1; j <= nPeriod; j++) {
-         double h = iHigh(_Symbol, PERIOD_D1, dshift + j);
-         double l = iLow(_Symbol, PERIOD_D1, dshift + j);
-         sum += (h - l);
-      }
-      double avg = sum / nPeriod;
-      for (int j = 1; j <= nPeriod; j++) {
-         double h = iHigh(_Symbol, PERIOD_D1, dshift + j);
-         double l = iLow(_Symbol, PERIOD_D1, dshift + j);
-         var += MathPow((h - l) - avg, 2);
-      }
-      dev = MathSqrt(var / nPeriod);
-      openPrice = iOpen(_Symbol, PERIOD_D1, dshift);
-   }
-   double dev_plus_1 = RoundToNearestHalf(openPrice + dev);
-   double dev_minus_1 = RoundToNearestHalf(openPrice - dev);
-   Print("📊 Candle - H:", DoubleToString(candleHigh, _Digits), " L:", DoubleToString(candleLow, _Digits), 
-         " Dev+1:", DoubleToString(dev_plus_1, _Digits), " Dev-1:", DoubleToString(dev_minus_1, _Digits));
-   
-   // Lógica para posição SELL
-   if (hasSellPosition && sellOpenTime < candleStart) {
-      double currentSL = 0;
-      double currentTP = 0;
-      if (PositionSelectByTicket(sellTicket)) {
-         currentSL = PositionGetDouble(POSITION_SL);
-         currentTP = PositionGetDouble(POSITION_TP);
-      }
-      if (candleHigh < dev_plus_1) {
-         Print("🎯 SELL: High < Dev+1 - Colocando STOP em ", DoubleToString(dev_plus_1, _Digits));
-         double newTP = (currentTP > 0) ? currentTP : 0;
-         if (trade.PositionModify(sellTicket, dev_plus_1, newTP)) {
-            Print("✅ Stop SELL colocado");
-         } else {
-            Print("❌ Erro stop SELL: ", GetLastError());
-         }
-      } else if (candleLow > dev_plus_1) {
-         Print("🎯 SELL: Low > Dev+1 - Movendo TP para ", DoubleToString(dev_plus_1, _Digits));
-         double newSL = (currentSL > 0) ? currentSL : 0;
-         if (trade.PositionModify(sellTicket, newSL, dev_plus_1)) {
-            Print("✅ TP SELL movido");
-         } else {
-            Print("❌ Erro TP SELL: ", GetLastError());
-         }
-      }
-   }
-   // Lógica para posição BUY
-   if (hasBuyPosition && buyOpenTime < candleStart) {
-      double currentSL = 0;
-      double currentTP = 0;
-      if (PositionSelectByTicket(buyTicket)) {
-         currentSL = PositionGetDouble(POSITION_SL);
-         currentTP = PositionGetDouble(POSITION_TP);
-      }
-      if (candleLow > dev_minus_1) {
-         Print("🎯 BUY: Low > Dev-1 - Colocando STOP em ", DoubleToString(dev_minus_1, _Digits));
-         double newTP = (currentTP > 0) ? currentTP : 0;
-         if (trade.PositionModify(buyTicket, dev_minus_1, newTP)) {
-            Print("✅ Stop BUY colocado");
-         } else {
-            Print("❌ Erro stop BUY: ", GetLastError());
-         }
-      } else if (candleHigh < dev_minus_1) {
-         Print("🎯 BUY: High < Dev-1 - Movendo TP para ", DoubleToString(dev_minus_1, _Digits));
-         double newSL = (currentSL > 0) ? currentSL : 0;
-         if (trade.PositionModify(buyTicket, newSL, dev_minus_1)) {
-            Print("✅ TP BUY movido");
-         } else {
-            Print("❌ Erro TP BUY: ", GetLastError());
-         }
-      }
-   }
-}
-
