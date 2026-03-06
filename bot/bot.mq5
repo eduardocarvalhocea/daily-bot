@@ -138,7 +138,8 @@ bool HasPosition() {
 
 //────────────────────────────────────────────────────────────────────────────
 // Enter at market in direction dir (ORDER_TYPE_BUY or ORDER_TYPE_SELL).
-// SL = rangeSize from entry, TP = rangeSize × rrMultiplier.
+// SL = range boundary (orLow for BUY, orHigh for SELL — the logical invalidation level).
+// TP = entry + riskDist × rrMultiplier. Lot sized on actual risk distance.
 void EnterMarket(ENUM_ORDER_TYPE dir) {
    double rangeSize = g_orHigh - g_orLow;
    if (rangeSize <= 0) { Print("Invalid range, skipping"); return; }
@@ -154,30 +155,35 @@ void EnterMarket(ENUM_ORDER_TYPE dir) {
       return;
    }
 
-   double lot = CalcLot(rangeSize);
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   Print("OR: H=", DoubleToString(g_orHigh,1),
-         " L=", DoubleToString(g_orLow,1),
-         " Range=", DoubleToString(rangeSize,1),
-         " Lot=", DoubleToString(lot,2),
-         " Dir=", EnumToString(dir),
-         " (Equity=", DoubleToString(equity,2), ")");
-
-   double tp_dist = rangeSize * rrMultiplier;
 
    if (dir == ORDER_TYPE_BUY) {
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double sl  = NormPrice(ask - rangeSize);
-      double tp  = NormPrice(ask + tp_dist);
+      double ask      = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double riskDist = ask - g_orLow;
+      if (riskDist <= 0) { Print("Buy skipped: ask below orLow"); g_traded = true; return; }
+      double sl  = NormPrice(g_orLow);
+      double tp  = NormPrice(ask + riskDist * rrMultiplier);
+      double lot = CalcLot(riskDist);
+      Print("OR: H=", DoubleToString(g_orHigh,1), " L=", DoubleToString(g_orLow,1),
+            " Range=", DoubleToString(rangeSize,1),
+            " Entry=", DoubleToString(ask,1), " Risk=", DoubleToString(riskDist,1),
+            " Lot=", DoubleToString(lot,2), " (Equity=", DoubleToString(equity,2), ")");
       if (trade.Buy(lot, _Symbol, ask, sl, tp))
          Print("Buy entered: ask=", DoubleToString(ask,1),
                " SL=", DoubleToString(sl,1), " TP=", DoubleToString(tp,1));
       else
          Print("Buy FAILED: ", GetLastError());
    } else {
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double sl  = NormPrice(bid + rangeSize);
-      double tp  = NormPrice(bid - tp_dist);
+      double bid      = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double riskDist = g_orHigh - bid;
+      if (riskDist <= 0) { Print("Sell skipped: bid above orHigh"); g_traded = true; return; }
+      double sl  = NormPrice(g_orHigh);
+      double tp  = NormPrice(bid - riskDist * rrMultiplier);
+      double lot = CalcLot(riskDist);
+      Print("OR: H=", DoubleToString(g_orHigh,1), " L=", DoubleToString(g_orLow,1),
+            " Range=", DoubleToString(rangeSize,1),
+            " Entry=", DoubleToString(bid,1), " Risk=", DoubleToString(riskDist,1),
+            " Lot=", DoubleToString(lot,2), " (Equity=", DoubleToString(equity,2), ")");
       if (trade.Sell(lot, _Symbol, bid, sl, tp))
          Print("Sell entered: bid=", DoubleToString(bid,1),
                " SL=", DoubleToString(sl,1), " TP=", DoubleToString(tp,1));
@@ -237,12 +243,13 @@ void ManagePosition() {
       ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
 
       if (ptype == POSITION_TYPE_BUY) {
-         double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-         double profit = bid - openPrice;
+         double bid      = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         double profit   = bid - openPrice;
+         double riskDist = openPrice - currentSL;   // actual 1R = entry - SL (= entry - orLow)
 
          // Breakeven: trigger at 1R, set SL at entry + buf
          // Clamped to max valid distance from current bid (broker stopLevel)
-         if (useBreakeven && !g_beApplied && profit >= rangeSize) {
+         if (useBreakeven && !g_beApplied && profit >= riskDist) {
             double idealSL = openPrice + buf;
             double maxSL   = bid - stopLevel - tick;   // broker minimum distance
             double newSL   = NormPrice(MathMin(idealSL, maxSL));
@@ -257,7 +264,7 @@ void ManagePosition() {
 
          // Trail (only after breakeven)
          if (useTrail && g_beApplied) {
-            double trailSL = bid - rangeSize * trailRangeMult;
+            double trailSL = bid - riskDist * trailRangeMult;
             double maxSL   = bid - stopLevel - tick;
             trailSL = MathMin(trailSL, maxSL);
             trailSL = MathMax(trailSL, openPrice + buf);   // never below BE
@@ -267,12 +274,13 @@ void ManagePosition() {
          }
 
       } else { // SELL
-         double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-         double profit = openPrice - ask;
+         double ask      = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         double profit   = openPrice - ask;
+         double riskDist = currentSL - openPrice;   // actual 1R = SL - entry (= orHigh - entry)
 
          // Breakeven: trigger at 1R, set SL at entry - buf
          // Clamped to min valid distance from current ask (broker stopLevel)
-         if (useBreakeven && !g_beApplied && profit >= rangeSize) {
+         if (useBreakeven && !g_beApplied && profit >= riskDist) {
             double idealSL = openPrice - buf;
             double minSL   = ask + stopLevel + tick;   // broker minimum distance
             double newSL   = NormPrice(MathMax(idealSL, minSL));
@@ -287,7 +295,7 @@ void ManagePosition() {
 
          // Trail (only after breakeven)
          if (useTrail && g_beApplied) {
-            double trailSL = ask + rangeSize * trailRangeMult;
+            double trailSL = ask + riskDist * trailRangeMult;
             double minSL   = ask + stopLevel + tick;
             trailSL = MathMax(trailSL, minSL);
             trailSL = MathMin(trailSL, openPrice - buf);   // never above BE
