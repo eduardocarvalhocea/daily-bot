@@ -1,2 +1,17 @@
+# macOS
+.DS_Store
+
+# MT5 compiled binaries
+*.ex5
+*.ex4
+
+# Backtest logs (gerados pelo MT5, podem ser grandes)
 log/
+
+# Dataset (arquivos CSV grandes)
 dataset/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
