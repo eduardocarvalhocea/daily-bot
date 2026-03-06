@@ -36,7 +36,7 @@ input int    eodHour        = 21;       // Force-close hour (CET)
 input int    eodMin         = 0;        // Force-close minute
 
 input group "═══ Trade ═══"
-input double rrMultiplier   = 5.0;      // TP = range × rrMultiplier (use 5.0)
+input double rrMultiplier   = 10.0;      // TP = range × rrMultiplier (use 5.0)
 input int    minRangePoints = 0;        // Min range to trade (0 = off)
 input int    maxRangePoints = 0;        // Max range to trade (0 = off)
 input int    entryOffsetPts = 0;        // Extra offset on entry (ticks, 0 = off) — filters false breakouts
@@ -49,11 +49,11 @@ input double trailRangeMult = 1.5;      // Trail distance = range × this (only 
 
 input group "═══ Position Sizing ═══"
 input bool   useDynamicLot  = true;     // true = fixed fractional, false = fixed lot
-input double riskPct        = 0.015;    // Risk per trade as fraction of equity (e.g. 0.015 = 1.5%)
+input double riskPct        = 0.1;    // Risk per trade as fraction of equity (e.g. 0.015 = 1.5%)
 input double pointValue     = 20.0;      // $ per point per lot — check symbol spec (UsaTec=20)
 input double fixedLot       = 1.0;      // Used when useDynamicLot = false
 input double minLot         = 0.01;     // Minimum lot size
-input double maxLot         = 100.0;    // Maximum lot size (safety cap)
+input double maxLot         = 10.0;    // Maximum lot size (safety cap)
 
 input group "═══ General ═══"
 input int      magicNumber  = 789012;
