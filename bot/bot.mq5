@@ -7,11 +7,11 @@
 //
 // Logic:
 //   1. Track High/Low between rangeStartHour:Min and rangeEndHour:Min.
-//   2. After range end, place BUY_STOP above high and SELL_STOP below low.
-//      Entry is offset by entryOffsetPoints to filter false breakouts.
+//   2. After range end, wait for an M5 candle to CLOSE beyond the range
+//      boundary (+ optional entryOffsetPts). Enter at market on that bar.
+//      Candle-close confirmation eliminates same-candle false breakouts.
 //   3. SL = range_size from entry. TP = range_size × rrMultiplier.
-//   4. When one executes, cancel the other.
-//   5. At eodHour:eodMin, force-close all and cancel pending orders.
+//   4. At eodHour:eodMin, force-close all.
 //
 // Breakeven & Trail:
 //   - useBreakeven: when profit reaches 1R (range size), SL moves to
@@ -39,7 +39,7 @@ input group "═══ Trade ═══"
 input double rrMultiplier   = 3.0;      // TP = range × rrMultiplier (use 3.0)
 input int    minRangePoints = 0;        // Min range to trade (0 = off)
 input int    maxRangePoints = 0;        // Max range to trade (0 = off)
-input int    entryOffsetPts = 0;        // Extra offset on entry (ticks, 0 = off) — filters false breakouts
+input int    entryOffsetPts = 0;        // Candle-close threshold offset (ticks above/below range, 0 = off)
 
 input group "═══ Breakeven & Trail ═══"
 input bool   useBreakeven   = true;     // Move SL to entry when profit reaches 1R
@@ -66,10 +66,10 @@ datetime g_lastDay      = 0;
 double   g_orHigh       = 0;
 double   g_orLow        = DBL_MAX;
 bool     g_rangeReady   = false;
-bool     g_ordersPlaced = false;
 bool     g_traded       = false;
 bool     g_eodDone      = false;
 bool     g_beApplied    = false;    // Breakeven already set today
+datetime g_lastBarTime  = 0;        // Last M5 bar open time (for candle-close detection)
 
 //────────────────────────────────────────────────────────────────────────────
 // Normalize price to instrument tick size.
@@ -136,112 +136,67 @@ bool HasPosition() {
    return false;
 }
 
-void CancelOrderType(ENUM_ORDER_TYPE otype) {
-   for (int i = OrdersTotal() - 1; i >= 0; i--) {
-      ulong t = OrderGetTicket(i);
-      if (OrderSelect(t) && OrderGetInteger(ORDER_MAGIC) == magicNumber)
-         if ((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE) == otype) {
-            trade.OrderDelete(t);
-            Print("Cancelled ", EnumToString(otype));
-         }
-   }
-}
-
-bool HasOrderType(ENUM_ORDER_TYPE otype) {
-   for (int i = 0; i < OrdersTotal(); i++) {
-      ulong t = OrderGetTicket(i);
-      if (OrderSelect(t) && OrderGetInteger(ORDER_MAGIC) == magicNumber)
-         if ((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE) == otype)
-            return true;
-   }
-   return false;
-}
-
 //────────────────────────────────────────────────────────────────────────────
-void PlaceBreakoutOrders() {
+// Enter at market in direction dir (ORDER_TYPE_BUY or ORDER_TYPE_SELL).
+// SL = rangeSize from entry, TP = rangeSize × rrMultiplier.
+void EnterMarket(ENUM_ORDER_TYPE dir) {
    double rangeSize = g_orHigh - g_orLow;
+   if (rangeSize <= 0) { Print("Invalid range, skipping"); return; }
 
-   if (rangeSize <= 0) {
-      Print("Invalid range, skipping");
-      return;
-   }
    if (minRangePoints > 0 && rangeSize < minRangePoints) {
-      Print("Range too small (", DoubleToString(rangeSize,1), " < ", minRangePoints, ") — skipping day");
-      g_ordersPlaced = true;   // prevent re-entry every tick
+      Print("Range too small (", DoubleToString(rangeSize,1), " < ", minRangePoints, ") — skipping");
+      g_traded = true;
       return;
    }
    if (maxRangePoints > 0 && rangeSize > maxRangePoints) {
-      Print("Range too large (", DoubleToString(rangeSize,1), " > ", maxRangePoints, ") — skipping day");
-      g_ordersPlaced = true;   // prevent re-entry every tick
+      Print("Range too large (", DoubleToString(rangeSize,1), " > ", maxRangePoints, ") — skipping");
+      g_traded = true;
       return;
    }
 
-   double tp_dist = rangeSize * rrMultiplier;
-   double sl_dist = rangeSize;
-   double lot     = CalcLot(rangeSize);
-
-   double tick      = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   if (tick <= 0) tick = _Point;
-   double stopLevel = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
-   if (stopLevel < tick) stopLevel = tick;
-
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
+   double lot = CalcLot(rangeSize);
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    Print("OR: H=", DoubleToString(g_orHigh,1),
          " L=", DoubleToString(g_orLow,1),
          " Range=", DoubleToString(rangeSize,1),
          " Lot=", DoubleToString(lot,2),
+         " Dir=", EnumToString(dir),
          " (Equity=", DoubleToString(equity,2), ")");
 
-   // entryOffsetPts is in ticks — keeps price aligned to tick size
-   double offset = entryOffsetPts * tick;
+   double tp_dist = rangeSize * rrMultiplier;
 
-   // BUY_STOP above range high (+ optional offset), all prices normalized to tick
-   double buy_entry = NormPrice(g_orHigh + offset);
-   double buy_sl    = NormPrice(buy_entry - sl_dist);
-   double buy_tp    = NormPrice(buy_entry + tp_dist);
-
-   if (buy_entry > ask + stopLevel) {
-      if (trade.BuyStop(lot, buy_entry, _Symbol, buy_sl, buy_tp, ORDER_TIME_GTC))
-         Print("BuyStop placed: entry=", DoubleToString(buy_entry,1),
-               " SL=", DoubleToString(buy_sl,1),
-               " TP=", DoubleToString(buy_tp,1));
+   if (dir == ORDER_TYPE_BUY) {
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double sl  = NormPrice(ask - rangeSize);
+      double tp  = NormPrice(ask + tp_dist);
+      if (trade.Buy(lot, _Symbol, ask, sl, tp))
+         Print("Buy entered: ask=", DoubleToString(ask,1),
+               " SL=", DoubleToString(sl,1), " TP=", DoubleToString(tp,1));
       else
-         Print("BuyStop FAILED: ", GetLastError());
+         Print("Buy FAILED: ", GetLastError());
    } else {
-      Print("BuyStop skipped: price already above range high");
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double sl  = NormPrice(bid + rangeSize);
+      double tp  = NormPrice(bid - tp_dist);
+      if (trade.Sell(lot, _Symbol, bid, sl, tp))
+         Print("Sell entered: bid=", DoubleToString(bid,1),
+               " SL=", DoubleToString(sl,1), " TP=", DoubleToString(tp,1));
+      else
+         Print("Sell FAILED: ", GetLastError());
    }
 
-   // SELL_STOP below range low (- optional offset), all prices normalized to tick
-   double sell_entry = NormPrice(g_orLow - offset);
-   double sell_sl    = NormPrice(sell_entry + sl_dist);
-   double sell_tp    = NormPrice(sell_entry - tp_dist);
-
-   if (sell_entry < bid - stopLevel) {
-      if (trade.SellStop(lot, sell_entry, _Symbol, sell_sl, sell_tp, ORDER_TIME_GTC))
-         Print("SellStop placed: entry=", DoubleToString(sell_entry,1),
-               " SL=", DoubleToString(sell_sl,1),
-               " TP=", DoubleToString(sell_tp,1));
-      else
-         Print("SellStop FAILED: ", GetLastError());
-   } else {
-      Print("SellStop skipped: price already below range low");
-   }
-
-   g_ordersPlaced = true;
+   g_traded = true;
 }
 
 //────────────────────────────────────────────────────────────────────────────
 void ResetDayState() {
-   g_orHigh       = 0;
-   g_orLow        = DBL_MAX;
-   g_rangeReady   = false;
-   g_ordersPlaced = false;
-   g_traded       = false;
-   g_eodDone      = false;
-   g_beApplied    = false;
+   g_orHigh      = 0;
+   g_orLow       = DBL_MAX;
+   g_rangeReady  = false;
+   g_traded      = false;
+   g_eodDone     = false;
+   g_beApplied   = false;
+   g_lastBarTime = 0;
 }
 
 //────────────────────────────────────────────────────────────────────────────
@@ -411,29 +366,27 @@ void OnTick() {
       return;
    }
 
-   // ── Phase 2: Place orders ──────────────────────────────────────────────
-   if (!g_ordersPlaced && !g_traded) {
-      PlaceBreakoutOrders();
-   }
+   // ── Phase 2: Candle-close confirmation ────────────────────────────────
+   if (!g_traded) {
+      datetime barTime = iTime(_Symbol, PERIOD_M5, 0);
+      if (barTime != g_lastBarTime) {
+         g_lastBarTime = barTime;
 
-   // ── Phase 3: Cancel opposite when one executes ─────────────────────────
-   if (HasPosition()) {
-      g_traded = true;
-      bool hasBuy  = false, hasSell = false;
-      for (int i = 0; i < PositionsTotal(); i++) {
-         ulong t = PositionGetTicket(i);
-         if (t > 0 && PositionSelectByTicket(t) &&
-             PositionGetInteger(POSITION_MAGIC) == magicNumber) {
-            if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)  hasBuy  = true;
-            if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL) hasSell = true;
-         }
+         double tick   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+         if (tick <= 0) tick = _Point;
+         double offset = entryOffsetPts * tick;
+
+         double closePrice = iClose(_Symbol, PERIOD_M5, 1);
+         if (closePrice > g_orHigh + offset)
+            EnterMarket(ORDER_TYPE_BUY);
+         else if (closePrice < g_orLow - offset)
+            EnterMarket(ORDER_TYPE_SELL);
       }
-      if (hasBuy  && HasOrderType(ORDER_TYPE_SELL_STOP)) CancelOrderType(ORDER_TYPE_SELL_STOP);
-      if (hasSell && HasOrderType(ORDER_TYPE_BUY_STOP))  CancelOrderType(ORDER_TYPE_BUY_STOP);
-
-      // ── Phase 4: Breakeven & trail ──────────────────────────────────────
-      ManagePosition();
    }
+
+   // ── Phase 3: Breakeven & trail ─────────────────────────────────────────
+   if (HasPosition())
+      ManagePosition();
 }
 
 //────────────────────────────────────────────────────────────────────────────
