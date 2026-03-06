@@ -56,13 +56,15 @@ input double minLot         = 0.01;     // Minimum lot size
 input double maxLot         = 100.0;    // Maximum lot size (safety cap)
 
 input group "═══ General ═══"
-input int      magicNumber  = 789012;
-input datetime startDate    = D'2024.01.01 00:00';
+input int      magicNumber        = 789012;
+input datetime startDate          = D'2024.01.01 00:00';
+input int      heartbeatMinutes   = 60;    // Heartbeat log interval in minutes (0 = off)
 
 CTrade trade;
 
 // Daily state
 datetime g_lastDay      = 0;
+datetime g_lastHeartbeat = 0;
 double   g_orHigh       = 0;
 double   g_orLow        = DBL_MAX;
 bool     g_rangeReady   = false;
@@ -345,6 +347,47 @@ void ManagePosition() {
 }
 
 //────────────────────────────────────────────────────────────────────────────
+void PrintHeartbeat(int nowHM, int rangeStartHM, int rangeEndHM, int eodHM) {
+   if (heartbeatMinutes <= 0) return;
+   datetime now = TimeCurrent();
+   if ((int)(now - g_lastHeartbeat) < heartbeatMinutes * 60) return;
+   g_lastHeartbeat = now;
+
+   string phase;
+   if (g_eodDone)
+      phase = "EOD_DONE";
+   else if (HasPosition())
+      phase = "IN_POSITION";
+   else if (g_ordersPlaced)
+      phase = "WAITING_BREAKOUT";
+   else if (g_rangeReady)
+      phase = "RANGE_READY_NO_ORDERS";
+   else if (nowHM >= rangeStartHM && nowHM < rangeEndHM)
+      phase = "BUILDING_RANGE";
+   else if (nowHM < rangeStartHM)
+      phase = "PRE_RANGE";
+   else
+      phase = "POST_RANGE_NO_TRADE";
+
+   string rangeInfo = "";
+   if (g_orHigh > 0 && g_orLow < DBL_MAX)
+      rangeInfo = StringFormat(" OR=[%.1f-%.1f size=%.1f]", g_orLow, g_orHigh, g_orHigh - g_orLow);
+
+   int pendingOrders = 0;
+   for (int i = 0; i < OrdersTotal(); i++) {
+      ulong t = OrderGetTicket(i);
+      if (OrderSelect(t) && OrderGetInteger(ORDER_MAGIC) == magicNumber)
+         pendingOrders++;
+   }
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   Print("[HEARTBEAT] ", phase, rangeInfo,
+         " | pending=", pendingOrders,
+         " | equity=", DoubleToString(equity, 2),
+         " | serverTime=", TimeToString(now, TIME_DATE|TIME_MINUTES));
+}
+
+//────────────────────────────────────────────────────────────────────────────
 int OnInit() {
    trade.SetExpertMagicNumber(magicNumber);
    trade.SetDeviationInPoints(10);
@@ -384,6 +427,9 @@ void OnTick() {
       ResetDayState();
       Print("New day: ", TimeToString(today));
    }
+
+   // ── Heartbeat ──────────────────────────────────────────────────────────
+   PrintHeartbeat(nowHM, rangeStartHM, rangeEndHM, eodHM);
 
    // ── EOD ────────────────────────────────────────────────────────────────
    if (nowHM >= eodHM) {
