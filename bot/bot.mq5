@@ -39,7 +39,7 @@ input group "═══ Trade ═══"
 input double rrMultiplier   = 3.0;      // TP = range × rrMultiplier (use 3.0)
 input int    minRangePoints = 0;        // Min range to trade (0 = off)
 input int    maxRangePoints = 0;        // Max range to trade (0 = off)
-input int    entryOffsetPts = 0;        // Extra offset on entry (pts, 0 = off) — filters false breakouts
+input int    entryOffsetPts = 0;        // Extra offset on entry (ticks, 0 = off) — filters false breakouts
 
 input group "═══ Breakeven & Trail ═══"
 input bool   useBreakeven   = true;     // Move SL to entry when profit reaches 1R
@@ -180,8 +180,10 @@ void PlaceBreakoutOrders() {
    double sl_dist = rangeSize;
    double lot     = CalcLot(rangeSize);
 
+   double tick      = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if (tick <= 0) tick = _Point;
    double stopLevel = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
-   if (stopLevel < 10 * _Point) stopLevel = 10 * _Point;
+   if (stopLevel < tick) stopLevel = tick;
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -193,12 +195,13 @@ void PlaceBreakoutOrders() {
          " Lot=", DoubleToString(lot,2),
          " (Equity=", DoubleToString(equity,2), ")");
 
-   double offset = entryOffsetPts * _Point;
+   // entryOffsetPts is in ticks — keeps price aligned to tick size
+   double offset = entryOffsetPts * tick;
 
-   // BUY_STOP above range high (+ optional offset)
-   double buy_entry = g_orHigh + offset;
-   double buy_sl    = buy_entry - sl_dist;
-   double buy_tp    = buy_entry + tp_dist;
+   // BUY_STOP above range high (+ optional offset), all prices normalized to tick
+   double buy_entry = NormPrice(g_orHigh + offset);
+   double buy_sl    = NormPrice(buy_entry - sl_dist);
+   double buy_tp    = NormPrice(buy_entry + tp_dist);
 
    if (buy_entry > ask + stopLevel) {
       if (trade.BuyStop(lot, buy_entry, _Symbol, buy_sl, buy_tp, ORDER_TIME_GTC))
@@ -211,10 +214,10 @@ void PlaceBreakoutOrders() {
       Print("BuyStop skipped: price already above range high");
    }
 
-   // SELL_STOP below range low (- optional offset)
-   double sell_entry = g_orLow - offset;
-   double sell_sl    = sell_entry + sl_dist;
-   double sell_tp    = sell_entry - tp_dist;
+   // SELL_STOP below range low (- optional offset), all prices normalized to tick
+   double sell_entry = NormPrice(g_orLow - offset);
+   double sell_sl    = NormPrice(sell_entry + sl_dist);
+   double sell_tp    = NormPrice(sell_entry - tp_dist);
 
    if (sell_entry < bid - stopLevel) {
       if (trade.SellStop(lot, sell_entry, _Symbol, sell_sl, sell_tp, ORDER_TIME_GTC))
