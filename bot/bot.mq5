@@ -43,7 +43,7 @@ input int    entryOffsetPts = 0;        // Extra offset on entry (pts, 0 = off) 
 
 input group "═══ Breakeven & Trail ═══"
 input bool   useBreakeven   = true;     // Move SL to entry when profit reaches 1R
-input int    beBufPoints    = 5;        // Breakeven buffer: SL = entry ± this (pts)
+input int    beBufTicks     = 2;        // Breakeven buffer in ticks (SL = entry ± N ticks)
 input bool   useTrail       = false;    // Trail SL after breakeven (false = hold SL at BE)
 input double trailRangeMult = 1.5;      // Trail distance = range × this (only when useTrail)
 
@@ -70,6 +70,14 @@ bool     g_ordersPlaced = false;
 bool     g_traded       = false;
 bool     g_eodDone      = false;
 bool     g_beApplied    = false;    // Breakeven already set today
+
+//────────────────────────────────────────────────────────────────────────────
+// Normalize price to instrument tick size.
+double NormPrice(double price) {
+   double tick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if (tick <= 0) tick = _Point;
+   return MathRound(price / tick) * tick;
+}
 
 //────────────────────────────────────────────────────────────────────────────
 int HM(int h, int m) { return h * 60 + m; }
@@ -236,7 +244,9 @@ void ResetDayState() {
 //
 // Breakeven (useBreakeven):
 //   Triggers when floating profit >= 1R (range size).
-//   Moves SL to entry ± beBufPoints so the trade becomes risk-free.
+//   Moves SL to entry ± beBufTicks (ticks) so the trade is nearly risk-free.
+//   SL is clamped to broker's SYMBOL_TRADE_STOPS_LEVEL and normalized to
+//   tick size to avoid "Invalid stops" rejections.
 //   Fires once per trade; does NOT limit gain (TP unchanged).
 //
 // Trailing stop (useTrail, only after breakeven):
@@ -250,6 +260,12 @@ void ManagePosition() {
    double rangeSize = g_orHigh - g_orLow;
    if (rangeSize <= 0) return;
 
+   double tick      = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if (tick <= 0) tick = _Point;
+   double stopLevel = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   if (stopLevel < tick) stopLevel = tick;
+   double buf       = beBufTicks * tick;
+
    for (int i = 0; i < PositionsTotal(); i++) {
       ulong ticket = PositionGetTicket(i);
       if (!PositionSelectByTicket(ticket)) continue;
@@ -259,46 +275,52 @@ void ManagePosition() {
       double currentSL = PositionGetDouble(POSITION_SL);
       double currentTP = PositionGetDouble(POSITION_TP);
       ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-      double buf = beBufPoints * _Point;
 
       if (ptype == POSITION_TYPE_BUY) {
-         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
          double profit = bid - openPrice;
 
-         // Breakeven
+         // Breakeven: trigger at 1R, set SL at entry + buf
+         // Clamped to max valid distance from current bid (broker stopLevel)
          if (useBreakeven && !g_beApplied && profit >= rangeSize) {
-            double newSL = openPrice + buf;
-            if (newSL > currentSL) {
+            double idealSL = openPrice + buf;
+            double maxSL   = bid - stopLevel - tick;   // broker minimum distance
+            double newSL   = NormPrice(MathMin(idealSL, maxSL));
+            if (newSL > currentSL + tick) {
                if (trade.PositionModify(ticket, newSL, currentTP)) {
                   g_beApplied = true;
                   Print("BE set BUY: SL -> ", DoubleToString(newSL, 1),
-                        " (profit=", DoubleToString(profit, 1), " pts)");
+                        " (profit=", DoubleToString(profit, 1), ")");
                }
             }
          }
 
          // Trail (only after breakeven)
          if (useTrail && g_beApplied) {
-            double trailSL  = bid - rangeSize * trailRangeMult;
-            double minSL    = openPrice + buf;          // never trail below BE
-            trailSL = MathMax(trailSL, minSL);
-            if (trailSL > currentSL + _Point) {
+            double trailSL = bid - rangeSize * trailRangeMult;
+            double maxSL   = bid - stopLevel - tick;
+            trailSL = MathMin(trailSL, maxSL);
+            trailSL = MathMax(trailSL, openPrice + buf);   // never below BE
+            trailSL = NormPrice(trailSL);
+            if (trailSL > currentSL + tick)
                trade.PositionModify(ticket, trailSL, currentTP);
-            }
          }
 
       } else { // SELL
-         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
          double profit = openPrice - ask;
 
-         // Breakeven
+         // Breakeven: trigger at 1R, set SL at entry - buf
+         // Clamped to min valid distance from current ask (broker stopLevel)
          if (useBreakeven && !g_beApplied && profit >= rangeSize) {
-            double newSL = openPrice - buf;
-            if (newSL < currentSL) {
+            double idealSL = openPrice - buf;
+            double minSL   = ask + stopLevel + tick;   // broker minimum distance
+            double newSL   = NormPrice(MathMax(idealSL, minSL));
+            if (newSL < currentSL - tick) {
                if (trade.PositionModify(ticket, newSL, currentTP)) {
                   g_beApplied = true;
                   Print("BE set SELL: SL -> ", DoubleToString(newSL, 1),
-                        " (profit=", DoubleToString(profit, 1), " pts)");
+                        " (profit=", DoubleToString(profit, 1), ")");
                }
             }
          }
@@ -306,11 +328,12 @@ void ManagePosition() {
          // Trail (only after breakeven)
          if (useTrail && g_beApplied) {
             double trailSL = ask + rangeSize * trailRangeMult;
-            double maxSL   = openPrice - buf;           // never trail above BE
-            trailSL = MathMin(trailSL, maxSL);
-            if (trailSL < currentSL - _Point) {
+            double minSL   = ask + stopLevel + tick;
+            trailSL = MathMax(trailSL, minSL);
+            trailSL = MathMin(trailSL, openPrice - buf);   // never above BE
+            trailSL = NormPrice(trailSL);
+            if (trailSL < currentSL - tick)
                trade.PositionModify(ticket, trailSL, currentTP);
-            }
          }
       }
    }
@@ -334,7 +357,7 @@ int OnInit() {
          " | Sizing: ", useDynamicLot ? StringFormat("%.1f%% risk (pointVal=%.2f)", riskPct*100, pointValue)
                                       : StringFormat("%.2f lot fixed", fixedLot),
          " | EntryOffset=", entryOffsetPts, "pts",
-         " | BE=", useBreakeven ? StringFormat("ON(buf=%dpts)", beBufPoints) : "OFF",
+         " | BE=", useBreakeven ? StringFormat("ON(buf=%dticks)", beBufTicks) : "OFF",
          " | Trail=", useTrail  ? StringFormat("ON(%.1fx)", trailRangeMult) : "OFF");
    return INIT_SUCCEEDED;
 }
