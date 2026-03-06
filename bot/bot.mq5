@@ -166,11 +166,13 @@ void PlaceBreakoutOrders() {
       return;
    }
    if (minRangePoints > 0 && rangeSize < minRangePoints) {
-      Print("Range too small (", DoubleToString(rangeSize,1), " < ", minRangePoints, ")");
+      Print("Range too small (", DoubleToString(rangeSize,1), " < ", minRangePoints, ") — skipping day");
+      g_ordersPlaced = true;   // prevent re-entry every tick
       return;
    }
    if (maxRangePoints > 0 && rangeSize > maxRangePoints) {
-      Print("Range too large (", DoubleToString(rangeSize,1), " > ", maxRangePoints, ")");
+      Print("Range too large (", DoubleToString(rangeSize,1), " > ", maxRangePoints, ") — skipping day");
+      g_ordersPlaced = true;   // prevent re-entry every tick
       return;
    }
 
