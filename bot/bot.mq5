@@ -55,6 +55,15 @@ input double fixedLot       = 1.0;      // Used when useDynamicLot = false
 input double minLot         = 0.01;     // Minimum lot size
 input double maxLot         = 10.0;    // Maximum lot size (safety cap)
 
+input group "═══ Filters ═══"
+input bool   useATRFilter      = true;      // Skip day if range is out of ATR band
+input int    atrFilterPeriod   = 14;        // ATR period (Daily timeframe)
+input double minRangeATRMult   = 0.15;      // Min range = ATR(D1) × this
+input double maxRangeATRMult   = 1.5;       // Max range = ATR(D1) × this
+input int    maxConsecLosses   = 3;         // Pause after N consecutive SL losses (0 = off)
+input bool   useDDFilter       = true;      // Circuit breaker on equity drawdown
+input double maxDDPct          = 0.15;      // Max DD from equity peak (0.15 = 15%)
+
 input group "═══ General ═══"
 input int      magicNumber  = 789012;
 input datetime startDate    = D'2024.01.01 00:00';
@@ -70,6 +79,12 @@ bool     g_ordersPlaced = false;
 bool     g_traded       = false;
 bool     g_eodDone      = false;
 bool     g_beApplied    = false;    // Breakeven already set today
+
+// Filter state
+int      g_atrHandle    = INVALID_HANDLE;
+int      g_consecLosses = 0;        // Consecutive SL losses (resets on win/BE)
+double   g_equityHWM    = 0;        // Equity high-water mark
+bool     g_skipDay      = false;    // Day skipped by a filter
 
 //────────────────────────────────────────────────────────────────────────────
 // Normalize price to instrument tick size.
@@ -158,6 +173,94 @@ bool HasOrderType(ENUM_ORDER_TYPE otype) {
 }
 
 //────────────────────────────────────────────────────────────────────────────
+// Check last closed trade and update consecutive loss counter.
+// A "loss" is any exit with profit < -1.0 (filters out BE closes at ~0).
+//────────────────────────────────────────────────────────────────────────────
+void UpdateConsecLosses() {
+   if (maxConsecLosses <= 0) return;
+   if (!HistorySelect(0, TimeCurrent())) return;
+
+   int total = HistoryDealsTotal();
+   for (int i = total - 1; i >= 0; i--) {
+      ulong ticket = HistoryDealGetTicket(i);
+      if (ticket == 0) continue;
+      if (HistoryDealGetInteger(ticket, DEAL_MAGIC) != magicNumber) continue;
+      if (HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+
+      double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+      if (profit < -1.0)
+         g_consecLosses++;
+      else
+         g_consecLosses = 0;
+      break;
+   }
+}
+
+//────────────────────────────────────────────────────────────────────────────
+// ATR filter: skip if today's range is too small or too large vs Daily ATR.
+//────────────────────────────────────────────────────────────────────────────
+bool PassesATRFilter(double rangeSize) {
+   if (!useATRFilter || g_atrHandle == INVALID_HANDLE) return true;
+
+   double atr[];
+   if (CopyBuffer(g_atrHandle, 0, 1, 1, atr) < 1) return true;
+
+   double dailyATR = atr[0];
+   if (dailyATR <= 0) return true;
+
+   double minRange = dailyATR * minRangeATRMult;
+   double maxRange = dailyATR * maxRangeATRMult;
+
+   if (rangeSize < minRange) {
+      Print("FILTER ATR: range ", DoubleToString(rangeSize,1),
+            " < min ", DoubleToString(minRange,1),
+            " (ATR=", DoubleToString(dailyATR,1), ") — skipping");
+      return false;
+   }
+   if (rangeSize > maxRange) {
+      Print("FILTER ATR: range ", DoubleToString(rangeSize,1),
+            " > max ", DoubleToString(maxRange,1),
+            " (ATR=", DoubleToString(dailyATR,1), ") — skipping");
+      return false;
+   }
+   return true;
+}
+
+//────────────────────────────────────────────────────────────────────────────
+// Consecutive loss filter: pause trading after maxConsecLosses SL hits.
+//────────────────────────────────────────────────────────────────────────────
+bool PassesConsecFilter() {
+   if (maxConsecLosses <= 0) return true;
+   if (g_consecLosses >= maxConsecLosses) {
+      Print("FILTER STREAK: ", g_consecLosses, " consecutive losses (max=",
+            maxConsecLosses, ") — skipping");
+      return false;
+   }
+   return true;
+}
+
+//────────────────────────────────────────────────────────────────────────────
+// Equity drawdown circuit breaker: stop trading if equity drops too far
+// from peak. Updates HWM on every call.
+//────────────────────────────────────────────────────────────────────────────
+bool PassesDDFilter() {
+   if (!useDDFilter) return true;
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if (equity > g_equityHWM) g_equityHWM = equity;
+   if (g_equityHWM <= 0) return true;
+
+   double dd = (g_equityHWM - equity) / g_equityHWM;
+   if (dd >= maxDDPct) {
+      Print("FILTER DD: equity ", DoubleToString(equity,0),
+            " is -", DoubleToString(dd * 100, 1), "% from HWM ",
+            DoubleToString(g_equityHWM,0), " — skipping");
+      return false;
+   }
+   return true;
+}
+
+//────────────────────────────────────────────────────────────────────────────
 void PlaceBreakoutOrders() {
    double rangeSize = g_orHigh - g_orLow;
 
@@ -242,6 +345,7 @@ void ResetDayState() {
    g_traded       = false;
    g_eodDone      = false;
    g_beApplied    = false;
+   g_skipDay      = false;
 }
 
 //────────────────────────────────────────────────────────────────────────────
@@ -355,6 +459,15 @@ int OnInit() {
       return INIT_FAILED;
    }
 
+   // ATR handle for daily timeframe (used by range filter)
+   if (useATRFilter) {
+      g_atrHandle = iATR(_Symbol, PERIOD_D1, atrFilterPeriod);
+      if (g_atrHandle == INVALID_HANDLE)
+         Print("WARNING: could not create ATR handle — ATR filter disabled");
+   }
+
+   g_equityHWM = AccountInfoDouble(ACCOUNT_EQUITY);
+
    Print("ORB bot started | Range: ", rangeStartHour, ":", StringFormat("%02d", rangeStartMin),
          "–", rangeEndHour, ":", StringFormat("%02d", rangeEndMin), " CET",
          " | RR=", rrMultiplier,
@@ -363,7 +476,10 @@ int OnInit() {
                                       : StringFormat("%.2f lot fixed", fixedLot),
          " | EntryOffset=", entryOffsetPts, "pts",
          " | BE=", useBreakeven ? StringFormat("ON(buf=%dticks)", beBufTicks) : "OFF",
-         " | Trail=", useTrail  ? StringFormat("ON(%.1fx)", trailRangeMult) : "OFF");
+         " | Trail=", useTrail  ? StringFormat("ON(%.1fx)", trailRangeMult) : "OFF",
+         " | Filters: ATR=", useATRFilter ? StringFormat("ON(%.0f-%.0f%% of D1)", minRangeATRMult*100, maxRangeATRMult*100) : "OFF",
+         " ConsecMax=", maxConsecLosses,
+         " DD=", useDDFilter ? StringFormat("ON(%.0f%%)", maxDDPct*100) : "OFF");
    return INIT_SUCCEEDED;
 }
 
@@ -379,10 +495,14 @@ void OnTick() {
    // ── New day ────────────────────────────────────────────────────────────
    datetime today = TodayDate();
    if (today != g_lastDay) {
+      // Update streak counter from yesterday's result before resetting
+      if (g_lastDay != 0)
+         UpdateConsecLosses();
       g_lastDay = today;
       CloseAll();
       ResetDayState();
-      Print("New day: ", TimeToString(today));
+      Print("New day: ", TimeToString(today),
+            (maxConsecLosses > 0 ? StringFormat(" | streak=%d", g_consecLosses) : ""));
    }
 
    // ── EOD ────────────────────────────────────────────────────────────────
@@ -398,8 +518,8 @@ void OnTick() {
    // ── Phase 1: Build opening range ───────────────────────────────────────
    if (!g_rangeReady) {
       if (nowHM >= rangeStartHM && nowHM < rangeEndHM) {
-         double h = iHigh(_Symbol, PERIOD_M5, 0);
-         double l = iLow(_Symbol,  PERIOD_M5, 0);
+         double h = iHigh(_Symbol, PERIOD_M5, 1);
+         double l = iLow(_Symbol,  PERIOD_M5, 1);
          if (h > g_orHigh) g_orHigh = h;
          if (l < g_orLow)  g_orLow  = l;
       } else if (nowHM >= rangeEndHM && g_orHigh > 0 && g_orLow < DBL_MAX) {
@@ -411,8 +531,16 @@ void OnTick() {
       return;
    }
 
-   // ── Phase 2: Place orders ──────────────────────────────────────────────
-   if (!g_ordersPlaced && !g_traded) {
+   // ── Phase 2: Run filters, then place orders ────────────────────────────
+   if (!g_ordersPlaced && !g_traded && !g_skipDay) {
+      double rangeSize = g_orHigh - g_orLow;
+
+      // Filters run once when range is ready, before placing orders
+      if (!PassesDDFilter() || !PassesConsecFilter() || !PassesATRFilter(rangeSize)) {
+         g_skipDay      = true;
+         g_ordersPlaced = true;   // prevent re-check every tick
+         return;
+      }
       PlaceBreakoutOrders();
    }
 
@@ -438,5 +566,7 @@ void OnTick() {
 
 //────────────────────────────────────────────────────────────────────────────
 void OnDeinit(const int reason) {
+   if (g_atrHandle != INVALID_HANDLE)
+      IndicatorRelease(g_atrHandle);
    Print("Bot stopped, reason=", reason);
 }
