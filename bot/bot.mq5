@@ -173,13 +173,15 @@ bool HasOrderType(ENUM_ORDER_TYPE otype) {
 }
 
 //────────────────────────────────────────────────────────────────────────────
-// Check last closed trade and update consecutive loss counter.
-// A "loss" is any exit with profit < -1.0 (filters out BE closes at ~0).
+// Count consecutive SL losses from the end of trade history.
+// Scans backwards through exit deals; stops at the first non-loss.
+// Idempotent — safe to call multiple times, always recalculates from scratch.
 //────────────────────────────────────────────────────────────────────────────
 void UpdateConsecLosses() {
    if (maxConsecLosses <= 0) return;
    if (!HistorySelect(0, TimeCurrent())) return;
 
+   g_consecLosses = 0;
    int total = HistoryDealsTotal();
    for (int i = total - 1; i >= 0; i--) {
       ulong ticket = HistoryDealGetTicket(i);
@@ -191,8 +193,7 @@ void UpdateConsecLosses() {
       if (profit < -1.0)
          g_consecLosses++;
       else
-         g_consecLosses = 0;
-      break;
+         break;   // streak broken — stop counting
    }
 }
 
