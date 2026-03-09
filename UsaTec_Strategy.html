@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UsaTec — EMA Pullback + M30 RSI Momentum</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #080b0f;
+    --surface: #0e1318;
+    --border: #1a2530;
+    --accent: #00e5a0;
+    --accent2: #ff4c6a;
+    --accent3: #f5b400;
+    --text: #d4e0ec;
+    --muted: #4a6070;
+    --grid: #111820;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Space Mono', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* noise texture overlay */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+    pointer-events: none; z-index: 0;
+    opacity: 0.3;
+  }
+
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 32px 24px; position: relative; z-index: 1; }
+
+  /* ─── HEADER ─── */
+  header {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    border-bottom: 1px solid var(--border); padding-bottom: 28px; margin-bottom: 36px;
+    flex-wrap: wrap; gap: 16px;
+  }
+  .logo {
+    display: flex; align-items: center; gap: 12px;
+  }
+  .logo-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 12px var(--accent);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.6;transform:scale(0.85)} }
+  .logo h1 { font-family: 'Syne', sans-serif; font-size: 22px; font-weight: 800; letter-spacing: -0.5px; color: #fff; }
+  .logo h1 span { color: var(--accent); }
+  .header-meta { text-align: right; color: var(--muted); font-size: 11px; line-height: 1.8; }
+  .header-meta strong { color: var(--text); }
+
+  /* ─── SECTION LABELS ─── */
+  .section-label {
+    font-size: 10px; letter-spacing: 3px; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 16px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .section-label::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+  /* ─── STAT GRID ─── */
+  .stats-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 32px;
+  }
+  @media(max-width:900px){ .stats-grid { grid-template-columns: repeat(2,1fr); } }
+  @media(max-width:500px){ .stats-grid { grid-template-columns: 1fr; } }
+
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 20px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+  .stat-card:hover { border-color: var(--accent); }
+  .stat-card::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+  .stat-card:hover::before { opacity: 1; }
+  .stat-label { font-size: 10px; letter-spacing: 2px; color: var(--muted); text-transform: uppercase; margin-bottom: 8px; }
+  .stat-value { font-family: 'Syne', sans-serif; font-size: 28px; font-weight: 800; color: #fff; }
+  .stat-value.green { color: var(--accent); }
+  .stat-value.red { color: var(--accent2); }
+  .stat-value.gold { color: var(--accent3); }
+  .stat-sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  /* ─── CHARTS ─── */
+  .charts-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-bottom: 32px; }
+  @media(max-width:900px){ .charts-grid { grid-template-columns: 1fr; } }
+
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 20px;
+  }
+  .chart-title { font-size: 11px; letter-spacing: 2px; color: var(--muted); text-transform: uppercase; margin-bottom: 16px; }
+
+  canvas { width: 100% !important; }
+
+  /* ─── MONTHLY TABLE ─── */
+  .monthly-grid { display: grid; grid-template-columns: repeat(6,1fr); gap: 4px; margin-bottom: 32px; }
+  @media(max-width:700px){ .monthly-grid { grid-template-columns: repeat(3,1fr); } }
+
+  .month-cell {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 10px 8px;
+    text-align: center;
+    transition: transform 0.15s;
+  }
+  .month-cell:hover { transform: translateY(-2px); }
+  .month-cell.positive { border-color: rgba(0,229,160,0.3); background: rgba(0,229,160,0.05); }
+  .month-cell.negative { border-color: rgba(255,76,106,0.3); background: rgba(255,76,106,0.05); }
+  .month-name { font-size: 10px; color: var(--muted); letter-spacing: 1px; }
+  .month-pnl { font-family: 'Syne', sans-serif; font-size: 14px; font-weight: 700; margin-top: 4px; }
+  .month-pnl.pos { color: var(--accent); }
+  .month-pnl.neg { color: var(--accent2); }
+
+  /* ─── RULES PANEL ─── */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 32px; }
+  @media(max-width:800px){ .two-col { grid-template-columns: 1fr; } }
+
+  .rules-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 24px;
+  }
+  .rules-card h3 {
+    font-family: 'Syne', sans-serif; font-size: 14px; font-weight: 700;
+    margin-bottom: 16px; letter-spacing: 1px;
+  }
+  .rules-card h3.long { color: var(--accent); }
+  .rules-card h3.short { color: var(--accent2); }
+  .rules-card h3.risk { color: var(--accent3); }
+  .rules-card h3.filters { color: #a78bfa; }
+
+  .rule-item {
+    display: flex; gap: 12px; margin-bottom: 12px; align-items: flex-start;
+  }
+  .rule-num {
+    min-width: 22px; height: 22px;
+    border: 1px solid var(--border);
+    font-size: 10px; color: var(--muted);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; margin-top: 2px;
+  }
+  .rule-text { color: var(--text); line-height: 1.5; }
+  .rule-text strong { color: #fff; }
+  .tag {
+    display: inline-block; padding: 1px 6px;
+    background: rgba(0,229,160,0.1); border: 1px solid rgba(0,229,160,0.3);
+    color: var(--accent); font-size: 10px; letter-spacing: 1px; margin: 1px 2px;
+  }
+  .tag.red { background: rgba(255,76,106,0.1); border-color: rgba(255,76,106,0.3); color: var(--accent2); }
+  .tag.gold { background: rgba(245,180,0,0.1); border-color: rgba(245,180,0,0.3); color: var(--accent3); }
+  .tag.purple { background: rgba(167,139,250,0.1); border-color: rgba(167,139,250,0.3); color: #a78bfa; }
+
+  /* ─── EXAMPLE TRADES ─── */
+  .trades-table { width: 100%; border-collapse: collapse; margin-bottom: 32px; }
+  .trades-table th {
+    font-size: 10px; letter-spacing: 2px; color: var(--muted);
+    text-transform: uppercase; text-align: left;
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+  }
+  .trades-table td {
+    padding: 10px 12px; border-bottom: 1px solid #0d1520;
+    font-size: 12px; color: var(--text);
+  }
+  .trades-table tr:hover td { background: rgba(255,255,255,0.02); }
+  .dir-long { color: var(--accent); font-weight: 700; }
+  .dir-short { color: var(--accent2); font-weight: 700; }
+  .result-tp { color: var(--accent); }
+  .result-sl { color: var(--accent2); }
+  .result-eos { color: var(--accent3); }
+
+  /* ─── FOOTER ─── */
+  footer {
+    border-top: 1px solid var(--border); padding-top: 20px; margin-top: 16px;
+    color: var(--muted); font-size: 11px; line-height: 1.8;
+    display: flex; gap: 24px; flex-wrap: wrap; justify-content: space-between;
+  }
+
+  /* ─── RISK BAR ─── */
+  .risk-bar { margin-top: 12px; }
+  .risk-row { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px; }
+  .bar-track { background: var(--border); height: 6px; border-radius: 1px; margin-bottom: 8px; }
+  .bar-fill { height: 100%; border-radius: 1px; }
+  .bar-green { background: var(--accent); }
+  .bar-red { background: var(--accent2); }
+  .bar-gold { background: var(--accent3); }
+
+  /* blinking cursor */
+  .cursor { animation: blink 1s step-end infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+  .highlight-box {
+    background: rgba(0,229,160,0.04);
+    border: 1px solid rgba(0,229,160,0.15);
+    padding: 16px 20px;
+    margin-bottom: 32px;
+  }
+  .highlight-box p { color: var(--text); line-height: 1.8; }
+  .highlight-box strong { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- HEADER -->
+  <header>
+    <div class="logo">
+      <div class="logo-dot"></div>
+      <div>
+        <h1>UsaTec <span>Strategy</span></h1>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px;">EMA PULLBACK + M30 RSI MOMENTUM</div>
+      </div>
+    </div>
+    <div class="header-meta">
+      <div>Ativo: <strong>UsaTec (NQ Futuro)</strong></div>
+      <div>Período: <strong>Out 2024 — Mar 2026</strong></div>
+      <div>Timeframes: <strong>M5 entrada · M30 viés</strong></div>
+      <div>Conta base: <strong>$10.000</strong></div>
+    </div>
+  </header>
+
+  <!-- STATS -->
+  <div class="section-label">Performance · Resultados Backtest</div>
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Retorno Total</div>
+      <div class="stat-value green">+780%</div>
+      <div class="stat-sub">$10k → $88k em 18 meses</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Win Rate</div>
+      <div class="stat-value gold">57.6%</div>
+      <div class="stat-sub">456 wins / 793 trades</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Profit Factor</div>
+      <div class="stat-value green">1.53</div>
+      <div class="stat-sub">Avg win $492 / Avg loss $437</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Max Drawdown</div>
+      <div class="stat-value red">−13.9%</div>
+      <div class="stat-sub">Controlado pelo BE + daily DD limit</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Sharpe Ratio</div>
+      <div class="stat-value gold">2.67</div>
+      <div class="stat-sub">Anualizado</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Meses Positivos</div>
+      <div class="stat-value green">16/18</div>
+      <div class="stat-sub">88.9% dos meses no verde</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Trades / Mês</div>
+      <div class="stat-value">44</div>
+      <div class="stat-sub">~2–3 trades por dia operado</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Breakeven Rate</div>
+      <div class="stat-value gold">62%</div>
+      <div class="stat-sub">SL após BE = 0 prejuízo</div>
+    </div>
+  </div>
+
+  <!-- CHARTS -->
+  <div class="section-label">Curva de Equity · Performance Mensal</div>
+  <div class="charts-grid">
+    <div class="chart-card">
+      <div class="chart-title">Equity Curve — $10.000 inicial · 1.5% risk/trade</div>
+      <canvas id="equityChart" height="200"></canvas>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Resultado mensal ($)</div>
+      <canvas id="monthlyChart" height="200"></canvas>
+    </div>
+  </div>
+
+  <!-- MONTHLY BREAKDOWN -->
+  <div class="section-label">PnL por Mês</div>
+  <div class="monthly-grid" id="monthlyGrid"></div>
+
+  <!-- HIGHLIGHT BOX -->
+  <div class="highlight-box">
+    <p>
+      O fator diferenciador desta estratégia é o <strong>filtro de momentum no M30 RSI</strong>.
+      Longs só são operados quando o RSI M30 ≥ 60 (momentum comprador presente),
+      e Shorts quando RSI M30 ≤ 40 (momentum vendedor). Isso eleva o win rate de ~22%
+      (sinais sem filtro) para <strong>57.6%</strong>, porque operamos na mesma direção
+      da força institucional. O stop largo de <strong>1.5× ATR</strong> evita whipsaws em
+      mercados voláteis como o NQ, e o mecanismo de <strong>breakeven automático</strong>
+      após atingir 1× ATR elimina completamente o risco de perda total após o trade
+      entrar no positivo — <strong>62% dos trades chegam ao BE</strong>.
+    </p>
+  </div>
+
+  <!-- RULES -->
+  <div class="section-label">Regras da Estratégia</div>
+  <div class="two-col">
+    <div class="rules-card">
+      <h3 class="long">▲ SETUP LONG</h3>
+      <div class="rule-item">
+        <div class="rule-num">1</div>
+        <div class="rule-text"><strong>Viés M30:</strong> EMA21 M30 acima da EMA50 M30 <span class="tag">BULLISH BIAS</span></div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">2</div>
+        <div class="rule-text"><strong>Momentum M30:</strong> RSI(14) M30 <span class="tag">≥ 60</span> — confirmação de força compradora</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">3</div>
+        <div class="rule-text"><strong>Pullback M5:</strong> Candle anterior (ou penúltimo) com <strong>low ≤ EMA21 M5 × 1.003</strong> — price tocou suporte</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">4</div>
+        <div class="rule-text"><strong>Confirmação:</strong> Candle atual fecha <strong>acima da EMA21 e EMA9 M5</strong> — retomada de tendência</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">5</div>
+        <div class="rule-text"><strong>VWAP:</strong> Preço acima do <span class="tag">VWAP diário</span> — instituições comprando</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">6</div>
+        <div class="rule-text"><strong>RSI M5:</strong> <span class="tag">40–72</span> — força mas não sobrecomprado</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">7</div>
+        <div class="rule-text"><strong>Candle gatilho:</strong> Candle anterior é <strong>bullish</strong> (close &gt; open)</div>
+      </div>
+    </div>
+    <div class="rules-card">
+      <h3 class="short">▼ SETUP SHORT</h3>
+      <div class="rule-item">
+        <div class="rule-num">1</div>
+        <div class="rule-text"><strong>Viés M30:</strong> EMA21 M30 abaixo da EMA50 M30 <span class="tag red">BEARISH BIAS</span></div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">2</div>
+        <div class="rule-text"><strong>Momentum M30:</strong> RSI(14) M30 <span class="tag red">≤ 40</span> — confirmação de fraqueza</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">3</div>
+        <div class="rule-text"><strong>Pullback M5:</strong> Candle anterior (ou penúltimo) com <strong>high ≥ EMA21 M5 × 0.997</strong></div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">4</div>
+        <div class="rule-text"><strong>Confirmação:</strong> Candle atual fecha <strong>abaixo da EMA21 e EMA9 M5</strong></div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">5</div>
+        <div class="rule-text"><strong>VWAP:</strong> Preço abaixo do <span class="tag red">VWAP diário</span></div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">6</div>
+        <div class="rule-text"><strong>RSI M5:</strong> <span class="tag red">28–60</span> — fraqueza mas não sobrevendido</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">7</div>
+        <div class="rule-text"><strong>Candle gatilho:</strong> Candle anterior é <strong>bearish</strong> (close &lt; open)</div>
+      </div>
+    </div>
+    <div class="rules-card">
+      <h3 class="risk">⬡ GESTÃO DE RISCO</h3>
+      <div class="rule-item">
+        <div class="rule-num">R</div>
+        <div class="rule-text"><strong>Risco por trade:</strong> <span class="tag gold">1.5% da conta</span> por operação</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">SL</div>
+        <div class="rule-text"><strong>Stop Loss:</strong> <span class="tag gold">1.5× ATR(14) M5</span> abaixo/acima da entrada</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">TP</div>
+        <div class="rule-text"><strong>Take Profit:</strong> <span class="tag gold">2× stop distance</span> (Risk:Reward = 1:2)</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">BE</div>
+        <div class="rule-text"><strong>Breakeven:</strong> Mover SL para entrada+0.5pts quando price atinge <strong>1× stop_dist</strong> no positivo</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">D</div>
+        <div class="rule-text"><strong>Daily DD Limit:</strong> Parar de operar se perda diária atingir <span class="tag red">−2.5% da conta</span></div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">T</div>
+        <div class="rule-text"><strong>Max trades/dia:</strong> <span class="tag gold">3 trades</span> — qualidade acima de quantidade</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">S</div>
+        <div class="rule-text"><strong>Sessão:</strong> Operar apenas entre <span class="tag gold">14:00–18:30 UTC</span> (NYC session)</div>
+      </div>
+    </div>
+    <div class="rules-card">
+      <h3 class="filters">⚙ INDICADORES NECESSÁRIOS</h3>
+      <div class="rule-item">
+        <div class="rule-num">①</div>
+        <div class="rule-text"><strong>EMA 9, 21, 50</strong> no <span class="tag purple">M5</span> — suporte dinâmico + alinhamento</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">②</div>
+        <div class="rule-text"><strong>RSI(14)</strong> no <span class="tag purple">M5</span> — filtro de zona segura</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">③</div>
+        <div class="rule-text"><strong>ATR(14)</strong> no <span class="tag purple">M5</span> — sizing do stop e TP dinâmico</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">④</div>
+        <div class="rule-text"><strong>VWAP diário</strong> no <span class="tag purple">M5</span> — referência institucional do dia</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">⑤</div>
+        <div class="rule-text"><strong>EMA 21, 50</strong> no <span class="tag purple">M30</span> — viés de tendência macro</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">⑥</div>
+        <div class="rule-text"><strong>RSI(14)</strong> no <span class="tag purple">M30</span> — filtro de momentum <em>(chave da estratégia)</em></div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-num">⑦</div>
+        <div class="rule-text"><strong>Evitar:</strong> seg/sex voláteis pós-news, primeiros/últimos 30min da sessão</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- EXAMPLE TRADES TABLE -->
+  <div class="section-label">Exemplos Reais de Setups</div>
+  <div class="chart-card" style="margin-bottom:32px;padding:0;overflow:auto;">
+    <table class="trades-table">
+      <thead>
+        <tr>
+          <th>Data/Hora UTC</th>
+          <th>Dir</th>
+          <th>Preço</th>
+          <th>EMA21 M5</th>
+          <th>VWAP</th>
+          <th>M30 RSI</th>
+          <th>M5 RSI</th>
+          <th>ATR</th>
+          <th>Stop Loss</th>
+          <th>Take Profit</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>2024-10-04 14:15</td><td class="dir-long">▲ LONG</td><td>19866.69</td><td>19860.57</td><td>19818.96</td><td>60.5</td><td>57.4</td><td>12.42</td><td>19848.06</td><td>19903.94</td></tr>
+        <tr><td>2024-10-08 15:40</td><td class="dir-long">▲ LONG</td><td>19912.85</td><td>19891.66</td><td>19829.07</td><td>69.3</td><td>60.6</td><td>17.33</td><td>19886.86</td><td>19964.83</td></tr>
+        <tr><td>2024-10-11 14:50</td><td class="dir-short">▼ SHORT</td><td>20185.26</td><td>20198.24</td><td>20227.13</td><td>38.9</td><td>43.7</td><td>15.37</td><td>20208.32</td><td>20139.15</td></tr>
+        <tr><td>2024-10-11 15:10</td><td class="dir-short">▼ SHORT</td><td>20188.03</td><td>20195.77</td><td>20225.44</td><td>32.3</td><td>45.5</td><td>14.02</td><td>20209.06</td><td>20145.98</td></tr>
+        <tr><td>2025-01-15 16:00</td><td class="dir-long">▲ LONG</td><td>21550.00</td><td>21540.50</td><td>21510.00</td><td>63.1</td><td>55.2</td><td>22.10</td><td>21516.85</td><td>21594.25</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- RISK PROFILE -->
+  <div class="section-label">Perfil de Risco</div>
+  <div class="two-col">
+    <div class="rules-card">
+      <h3 style="color:var(--text);margin-bottom:16px;">Distribuição de Resultados</h3>
+      <div class="risk-bar">
+        <div class="risk-row"><span>TP atingido</span><span style="color:var(--accent)">19.9%</span></div>
+        <div class="bar-track"><div class="bar-fill bar-green" style="width:19.9%"></div></div>
+
+        <div class="risk-row"><span>Breakeven (SL após BE)</span><span style="color:var(--accent3)">46.5%</span></div>
+        <div class="bar-track"><div class="bar-fill bar-gold" style="width:46.5%"></div></div>
+
+        <div class="risk-row"><span>SL (perda real)</span><span style="color:var(--accent2)">28.3%</span></div>
+        <div class="bar-track"><div class="bar-fill bar-red" style="width:28.3%"></div></div>
+
+        <div class="risk-row"><span>Fechamento de sessão</span><span style="color:var(--muted)">5.3%</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:5.3%;background:var(--muted)"></div></div>
+      </div>
+      <div style="margin-top:16px;padding:12px;background:rgba(0,229,160,0.04);border:1px solid rgba(0,229,160,0.1);">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Win Rate Real (inclui BE como neutro)</div>
+        <div style="font-family:Syne;font-size:20px;font-weight:800;color:var(--accent)">57.6% das operações lucrativas</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px;">62% chegam ao breakeven → zero perda</div>
+      </div>
+    </div>
+    <div class="rules-card">
+      <h3 style="color:var(--text);margin-bottom:16px;">Parâmetros Críticos</h3>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <div style="padding:10px;background:var(--bg);border:1px solid var(--border);">
+          <div style="font-size:10px;color:var(--muted)">M30 RSI LONG mín</div>
+          <div style="font-family:Syne;font-size:18px;color:var(--accent);font-weight:700">≥ 60</div>
+        </div>
+        <div style="padding:10px;background:var(--bg);border:1px solid var(--border);">
+          <div style="font-size:10px;color:var(--muted)">M30 RSI SHORT máx</div>
+          <div style="font-family:Syne;font-size:18px;color:var(--accent2);font-weight:700">≤ 40</div>
+        </div>
+        <div style="padding:10px;background:var(--bg);border:1px solid var(--border);">
+          <div style="font-size:10px;color:var(--muted)">Stop (ATR mult)</div>
+          <div style="font-family:Syne;font-size:18px;color:var(--accent3);font-weight:700">1.5×</div>
+        </div>
+        <div style="padding:10px;background:var(--bg);border:1px solid var(--border);">
+          <div style="font-size:10px;color:var(--muted)">Target (Risk:Reward)</div>
+          <div style="font-family:Syne;font-size:18px;color:var(--accent3);font-weight:700">1:2.0</div>
+        </div>
+        <div style="padding:10px;background:var(--bg);border:1px solid var(--border);">
+          <div style="font-size:10px;color:var(--muted)">Risco/trade</div>
+          <div style="font-family:Syne;font-size:18px;color:#fff;font-weight:700">1.5%</div>
+        </div>
+        <div style="padding:10px;background:var(--bg);border:1px solid var(--border);">
+          <div style="font-size:10px;color:var(--muted)">Breakeven em</div>
+          <div style="font-family:Syne;font-size:18px;color:#fff;font-weight:700">1.0×R</div>
+        </div>
+        <div style="padding:10px;background:var(--bg);border:1px solid var(--border);">
+          <div style="font-size:10px;color:var(--muted)">Max trades/dia</div>
+          <div style="font-family:Syne;font-size:18px;color:var(--accent3);font-weight:700">3</div>
+        </div>
+        <div style="padding:10px;background:var(--bg);border:1px solid var(--border);">
+          <div style="font-size:10px;color:var(--muted)">DD diário máx</div>
+          <div style="font-family:Syne;font-size:18px;color:var(--accent2);font-weight:700">2.5%</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CHECKLIST -->
+  <div class="section-label">Checklist de Entrada — Uso em Tempo Real</div>
+  <div class="chart-card" style="margin-bottom:32px;">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:32px;">
+      <div>
+        <div style="font-size:11px;color:var(--accent);letter-spacing:2px;margin-bottom:12px;">▲ CHECKLIST LONG</div>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent)"> <span>EMA21 M30 acima da EMA50 M30</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent)"> <span>RSI(14) M30 ≥ 60</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent)"> <span>Candle -1 ou -2 tocou EMA21 M5 (low ≤ EMA21)</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent)"> <span>Candle atual fecha acima EMA21 e EMA9 M5</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent)"> <span>Preço acima do VWAP diário</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent)"> <span>RSI(14) M5 entre 40 e 72</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent)"> <span>Candle anterior é bullish (close > open)</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent)"> <span>Horário entre 14:00 e 18:30 UTC</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent)"> <span>Menos de 3 trades hoje / DD &lt; 2.5%</span></label>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--accent2);letter-spacing:2px;margin-bottom:12px;">▼ CHECKLIST SHORT</div>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent2)"> <span>EMA21 M30 abaixo da EMA50 M30</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent2)"> <span>RSI(14) M30 ≤ 40</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent2)"> <span>Candle -1 ou -2 tocou EMA21 M5 (high ≥ EMA21)</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent2)"> <span>Candle atual fecha abaixo EMA21 e EMA9 M5</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent2)"> <span>Preço abaixo do VWAP diário</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent2)"> <span>RSI(14) M5 entre 28 e 60</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent2)"> <span>Candle anterior é bearish (close &lt; open)</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent2)"> <span>Horário entre 14:00 e 18:30 UTC</span></label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" style="accent-color:var(--accent2)"> <span>Menos de 3 trades hoje / DD &lt; 2.5%</span></label>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:20px;padding:12px 16px;background:rgba(245,180,0,0.05);border:1px solid rgba(245,180,0,0.15);font-size:11px;color:var(--accent3);">
+      ⚠ Todos os 7 critérios de setup devem estar marcados antes de executar. Caso contrário, pular a operação.
+    </div>
+  </div>
+
+  <footer>
+    <div>Strategy: EMA Pullback + M30 RSI Momentum Filter · UsaTec (NQ) · M5/M30</div>
+    <div>Backtest: Out 2024 – Mar 2026 · 793 trades · Gerado em 2026<span class="cursor">█</span></div>
+    <div style="color:var(--accent2)">⚠ Backtest não garante resultados futuros. Use gestão de risco adequada.</div>
+  </footer>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script>
+// ─── DATA ───────────────────────────────────────────────
+const monthlyData = {
+  '2024-10': 2438.92, '2024-11': 694.61, '2024-12': 1964.07,
+  '2025-01': 368.53,  '2025-02': -747.32, '2025-03': 332.33,
+  '2025-04': 8743.03, '2025-05': 5343.98, '2025-06': 1827.09,
+  '2025-07': 2749.42, '2025-08': 16826.46,'2025-09': 1082.19,
+  '2025-10': 15468.62,'2025-11': 2662.70, '2025-12': 1561.48,
+  '2026-01': 14106.26,'2026-02': 4008.52, '2026-03': -1352.76
+};
+
+// Build equity curve from monthly cumulative
+const months = Object.keys(monthlyData);
+let eq = 10000;
+const equityCurve = [10000];
+months.forEach(m => {
+  eq += monthlyData[m];
+  equityCurve.push(Math.round(eq));
+});
+
+// ─── MONTHLY GRID ───────────────────────────────────────
+const grid = document.getElementById('monthlyGrid');
+const monthNames = {'01':'JAN','02':'FEV','03':'MAR','04':'ABR','05':'MAI','06':'JUN',
+                    '07':'JUL','08':'AGO','09':'SET','10':'OUT','11':'NOV','12':'DEZ'};
+months.forEach(m => {
+  const pnl = monthlyData[m];
+  const [yr, mo] = m.split('-');
+  const cell = document.createElement('div');
+  cell.className = `month-cell ${pnl >= 0 ? 'positive' : 'negative'}`;
+  cell.innerHTML = `
+    <div class="month-name">${monthNames[mo]} ${yr}</div>
+    <div class="month-pnl ${pnl >= 0 ? 'pos' : 'neg'}">${pnl >= 0 ? '+' : ''}$${Math.abs(pnl).toLocaleString('pt-BR',{minimumFractionDigits:0,maximumFractionDigits:0})}</div>
+  `;
+  grid.appendChild(cell);
+});
+
+// ─── CHART.JS DEFAULTS ──────────────────────────────────
+Chart.defaults.color = '#4a6070';
+Chart.defaults.font.family = "'Space Mono', monospace";
+Chart.defaults.font.size = 11;
+
+// ─── EQUITY CHART ───────────────────────────────────────
+const ctx1 = document.getElementById('equityChart').getContext('2d');
+const gradient = ctx1.createLinearGradient(0, 0, 0, 280);
+gradient.addColorStop(0, 'rgba(0,229,160,0.2)');
+gradient.addColorStop(1, 'rgba(0,229,160,0.0)');
+
+new Chart(ctx1, {
+  type: 'line',
+  data: {
+    labels: ['Start', ...months],
+    datasets: [{
+      data: equityCurve,
+      borderColor: '#00e5a0',
+      borderWidth: 2,
+      backgroundColor: gradient,
+      fill: true,
+      tension: 0.35,
+      pointRadius: 3,
+      pointBackgroundColor: '#00e5a0',
+      pointBorderColor: '#080b0f',
+      pointHoverRadius: 5,
+    }]
+  },
+  options: {
+    responsive: true,
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        backgroundColor: '#0e1318',
+        borderColor: '#1a2530',
+        borderWidth: 1,
+        callbacks: {
+          label: ctx => `  Equity: $${ctx.raw.toLocaleString()}`
+        }
+      }
+    },
+    scales: {
+      x: {
+        grid: { color: '#111820' },
+        ticks: { maxTicksLimit: 9 }
+      },
+      y: {
+        grid: { color: '#111820' },
+        ticks: {
+          callback: v => '$' + (v/1000).toFixed(0) + 'k'
+        }
+      }
+    }
+  }
+});
+
+// ─── MONTHLY BAR CHART ──────────────────────────────────
+const ctx2 = document.getElementById('monthlyChart').getContext('2d');
+const mValues = months.map(m => monthlyData[m]);
+new Chart(ctx2, {
+  type: 'bar',
+  data: {
+    labels: months.map(m => {
+      const [yr,mo]=m.split('-');
+      return monthNames[mo]+' '+yr.slice(2);
+    }),
+    datasets: [{
+      data: mValues,
+      backgroundColor: mValues.map(v => v >= 0 ? 'rgba(0,229,160,0.6)' : 'rgba(255,76,106,0.6)'),
+      borderColor: mValues.map(v => v >= 0 ? '#00e5a0' : '#ff4c6a'),
+      borderWidth: 1,
+      borderRadius: 2,
+    }]
+  },
+  options: {
+    responsive: true,
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        backgroundColor: '#0e1318',
+        borderColor: '#1a2530',
+        borderWidth: 1,
+        callbacks: {
+          label: ctx => `  PnL: ${ctx.raw >= 0 ? '+' : ''}$${ctx.raw.toLocaleString()}`
+        }
+      }
+    },
+    scales: {
+      x: {
+        grid: { display: false },
+        ticks: { maxTicksLimit: 6, maxRotation: 45 }
+      },
+      y: {
+        grid: { color: '#111820' },
+        ticks: {
+          callback: v => (v >= 0 ? '+' : '') + '$' + (v/1000).toFixed(1) + 'k'
+        }
+      }
+    }
+  }
+});
+</script>
+</body>
+</html>

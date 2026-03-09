@@ -36,7 +36,7 @@ input int    eodHour        = 21;       // Force-close hour (CET)
 input int    eodMin         = 0;        // Force-close minute
 
 input group "═══ Trade ═══"
-input double rrMultiplier   = 10.0;      // TP = range × rrMultiplier (use 5.0)
+input double rrMultiplier   = 5.0;      // TP = range × rrMultiplier (use 5.0)
 input int    minRangePoints = 0;        // Min range to trade (0 = off)
 input int    maxRangePoints = 0;        // Max range to trade (0 = off)
 input int    entryOffsetPts = 0;        // Extra offset on entry (ticks, 0 = off) — filters false breakouts
@@ -53,26 +53,18 @@ input double riskPct        = 0.1;    // Risk per trade as fraction of equity (e
 input double pointValue     = 20.0;      // $ per point per lot — check symbol spec (UsaTec=20)
 input double fixedLot       = 1.0;      // Used when useDynamicLot = false
 input double minLot         = 0.01;     // Minimum lot size
-input double maxLot         = 10.0;    // Maximum lot size (safety cap)
-
-input group "═══ Filters ═══"
-input bool   useATRFilter      = true;      // Skip day if range is out of ATR band
-input int    atrFilterPeriod   = 14;        // ATR period (Daily timeframe)
-input double minRangeATRMult   = 0.15;      // Min range = ATR(D1) × this
-input double maxRangeATRMult   = 1.5;       // Max range = ATR(D1) × this
-input int    maxConsecLosses   = 3;         // Pause after N consecutive SL losses (0 = off)
-input int    cooldownDays      = 2;         // Days to skip after streak hit, then resume
-input bool   useDDFilter       = true;      // Circuit breaker on equity drawdown
-input double maxDDPct          = 0.15;      // Max DD from equity peak (0.15 = 15%)
+input double maxLot         = 100.0;    // Maximum lot size (safety cap)
 
 input group "═══ General ═══"
-input int      magicNumber  = 789012;
-input datetime startDate    = D'2024.01.01 00:00';
+input int      magicNumber        = 789012;
+input datetime startDate          = D'2024.01.01 00:00';
+input int      heartbeatMinutes   = 60;    // Heartbeat log interval in minutes (0 = off)
 
 CTrade trade;
 
 // Daily state
 datetime g_lastDay      = 0;
+datetime g_lastHeartbeat = 0;
 double   g_orHigh       = 0;
 double   g_orLow        = DBL_MAX;
 bool     g_rangeReady   = false;
@@ -80,14 +72,6 @@ bool     g_ordersPlaced = false;
 bool     g_traded       = false;
 bool     g_eodDone      = false;
 bool     g_beApplied    = false;    // Breakeven already set today
-
-// Filter state
-int      g_atrHandle        = INVALID_HANDLE;
-int      g_consecLosses     = 0;        // Consecutive SL losses (resets on win/BE)
-int      g_cooldownLeft     = 0;        // Days remaining in cooldown (0 = active)
-ulong    g_forgivenTicket   = 0;        // Deals at or before this ticket are ignored by streak counter
-double   g_equityHWM        = 0;        // Equity high-water mark
-bool     g_skipDay          = false;    // Day skipped by a filter
 
 //────────────────────────────────────────────────────────────────────────────
 // Normalize price to instrument tick size.
@@ -176,120 +160,6 @@ bool HasOrderType(ENUM_ORDER_TYPE otype) {
 }
 
 //────────────────────────────────────────────────────────────────────────────
-// Count consecutive SL losses from the end of trade history.
-// Scans backwards through exit deals; stops at the first non-loss.
-// Idempotent — safe to call multiple times, always recalculates from scratch.
-//────────────────────────────────────────────────────────────────────────────
-void UpdateConsecLosses() {
-   if (maxConsecLosses <= 0) return;
-   if (!HistorySelect(0, TimeCurrent())) return;
-
-   g_consecLosses = 0;
-   int total = HistoryDealsTotal();
-   for (int i = total - 1; i >= 0; i--) {
-      ulong ticket = HistoryDealGetTicket(i);
-      if (ticket == 0) continue;
-      if (ticket <= g_forgivenTicket) break;   // cooldown wiped these — stop
-      if (HistoryDealGetInteger(ticket, DEAL_MAGIC) != magicNumber) continue;
-      if (HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
-
-      double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
-      if (profit < -1.0)
-         g_consecLosses++;
-      else
-         break;   // streak broken — stop counting
-   }
-}
-
-//────────────────────────────────────────────────────────────────────────────
-// ATR filter: skip if today's range is too small or too large vs Daily ATR.
-//────────────────────────────────────────────────────────────────────────────
-bool PassesATRFilter(double rangeSize) {
-   if (!useATRFilter || g_atrHandle == INVALID_HANDLE) return true;
-
-   double atr[];
-   if (CopyBuffer(g_atrHandle, 0, 1, 1, atr) < 1) return true;
-
-   double dailyATR = atr[0];
-   if (dailyATR <= 0) return true;
-
-   double minRange = dailyATR * minRangeATRMult;
-   double maxRange = dailyATR * maxRangeATRMult;
-
-   if (rangeSize < minRange) {
-      Print("FILTER ATR: range ", DoubleToString(rangeSize,1),
-            " < min ", DoubleToString(minRange,1),
-            " (ATR=", DoubleToString(dailyATR,1), ") — skipping");
-      return false;
-   }
-   if (rangeSize > maxRange) {
-      Print("FILTER ATR: range ", DoubleToString(rangeSize,1),
-            " > max ", DoubleToString(maxRange,1),
-            " (ATR=", DoubleToString(dailyATR,1), ") — skipping");
-      return false;
-   }
-   return true;
-}
-
-//────────────────────────────────────────────────────────────────────────────
-// Consecutive loss filter with cooldown.
-// After maxConsecLosses SL hits, enter cooldown for cooldownDays.
-// Cooldown counts down each new trading day. When it expires, streak
-// resets to 0 and trading resumes.
-//────────────────────────────────────────────────────────────────────────────
-bool PassesConsecFilter() {
-   if (maxConsecLosses <= 0) return true;
-
-   // Currently in cooldown — skip day
-   if (g_cooldownLeft > 0) {
-      Print("FILTER COOLDOWN: ", g_cooldownLeft, " day(s) remaining — skipping");
-      g_cooldownLeft--;
-      if (g_cooldownLeft == 0) {
-         // Mark all current deals as forgiven so UpdateConsecLosses
-         // won't re-count them and trigger another cooldown loop
-         g_consecLosses = 0;
-         if (HistorySelect(0, TimeCurrent())) {
-            int total = HistoryDealsTotal();
-            if (total > 0)
-               g_forgivenTicket = HistoryDealGetTicket(total - 1);
-         }
-         Print("FILTER COOLDOWN: expired — streak reset, resuming tomorrow");
-      }
-      return false;
-   }
-
-   // Streak limit reached — start cooldown
-   if (g_consecLosses >= maxConsecLosses) {
-      g_cooldownLeft = cooldownDays;
-      Print("FILTER STREAK: ", g_consecLosses, " consecutive losses — entering ",
-            cooldownDays, " day cooldown");
-      return false;
-   }
-   return true;
-}
-
-//────────────────────────────────────────────────────────────────────────────
-// Equity drawdown circuit breaker: stop trading if equity drops too far
-// from peak. Updates HWM on every call.
-//────────────────────────────────────────────────────────────────────────────
-bool PassesDDFilter() {
-   if (!useDDFilter) return true;
-
-   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   if (equity > g_equityHWM) g_equityHWM = equity;
-   if (g_equityHWM <= 0) return true;
-
-   double dd = (g_equityHWM - equity) / g_equityHWM;
-   if (dd >= maxDDPct) {
-      Print("FILTER DD: equity ", DoubleToString(equity,0),
-            " is -", DoubleToString(dd * 100, 1), "% from HWM ",
-            DoubleToString(g_equityHWM,0), " — skipping");
-      return false;
-   }
-   return true;
-}
-
-//────────────────────────────────────────────────────────────────────────────
 void PlaceBreakoutOrders() {
    double rangeSize = g_orHigh - g_orLow;
 
@@ -374,7 +244,6 @@ void ResetDayState() {
    g_traded       = false;
    g_eodDone      = false;
    g_beApplied    = false;
-   g_skipDay      = false;
 }
 
 //────────────────────────────────────────────────────────────────────────────
@@ -478,6 +347,47 @@ void ManagePosition() {
 }
 
 //────────────────────────────────────────────────────────────────────────────
+void PrintHeartbeat(int nowHM, int rangeStartHM, int rangeEndHM, int eodHM) {
+   if (heartbeatMinutes <= 0) return;
+   datetime now = TimeCurrent();
+   if ((int)(now - g_lastHeartbeat) < heartbeatMinutes * 60) return;
+   g_lastHeartbeat = now;
+
+   string phase;
+   if (g_eodDone)
+      phase = "EOD_DONE";
+   else if (HasPosition())
+      phase = "IN_POSITION";
+   else if (g_ordersPlaced)
+      phase = "WAITING_BREAKOUT";
+   else if (g_rangeReady)
+      phase = "RANGE_READY_NO_ORDERS";
+   else if (nowHM >= rangeStartHM && nowHM < rangeEndHM)
+      phase = "BUILDING_RANGE";
+   else if (nowHM < rangeStartHM)
+      phase = "PRE_RANGE";
+   else
+      phase = "POST_RANGE_NO_TRADE";
+
+   string rangeInfo = "";
+   if (g_orHigh > 0 && g_orLow < DBL_MAX)
+      rangeInfo = StringFormat(" OR=[%.1f-%.1f size=%.1f]", g_orLow, g_orHigh, g_orHigh - g_orLow);
+
+   int pendingOrders = 0;
+   for (int i = 0; i < OrdersTotal(); i++) {
+      ulong t = OrderGetTicket(i);
+      if (OrderSelect(t) && OrderGetInteger(ORDER_MAGIC) == magicNumber)
+         pendingOrders++;
+   }
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   Print("[HEARTBEAT] ", phase, rangeInfo,
+         " | pending=", pendingOrders,
+         " | equity=", DoubleToString(equity, 2),
+         " | serverTime=", TimeToString(now, TIME_DATE|TIME_MINUTES));
+}
+
+//────────────────────────────────────────────────────────────────────────────
 int OnInit() {
    trade.SetExpertMagicNumber(magicNumber);
    trade.SetDeviationInPoints(10);
@@ -488,15 +398,6 @@ int OnInit() {
       return INIT_FAILED;
    }
 
-   // ATR handle for daily timeframe (used by range filter)
-   if (useATRFilter) {
-      g_atrHandle = iATR(_Symbol, PERIOD_D1, atrFilterPeriod);
-      if (g_atrHandle == INVALID_HANDLE)
-         Print("WARNING: could not create ATR handle — ATR filter disabled");
-   }
-
-   g_equityHWM = AccountInfoDouble(ACCOUNT_EQUITY);
-
    Print("ORB bot started | Range: ", rangeStartHour, ":", StringFormat("%02d", rangeStartMin),
          "–", rangeEndHour, ":", StringFormat("%02d", rangeEndMin), " CET",
          " | RR=", rrMultiplier,
@@ -505,10 +406,7 @@ int OnInit() {
                                       : StringFormat("%.2f lot fixed", fixedLot),
          " | EntryOffset=", entryOffsetPts, "pts",
          " | BE=", useBreakeven ? StringFormat("ON(buf=%dticks)", beBufTicks) : "OFF",
-         " | Trail=", useTrail  ? StringFormat("ON(%.1fx)", trailRangeMult) : "OFF",
-         " | Filters: ATR=", useATRFilter ? StringFormat("ON(%.0f-%.0f%% of D1)", minRangeATRMult*100, maxRangeATRMult*100) : "OFF",
-         " Consec=", maxConsecLosses > 0 ? StringFormat("%d(cool=%dd)", maxConsecLosses, cooldownDays) : "OFF",
-         " DD=", useDDFilter ? StringFormat("ON(%.0f%%)", maxDDPct*100) : "OFF");
+         " | Trail=", useTrail  ? StringFormat("ON(%.1fx)", trailRangeMult) : "OFF");
    return INIT_SUCCEEDED;
 }
 
@@ -524,15 +422,14 @@ void OnTick() {
    // ── New day ────────────────────────────────────────────────────────────
    datetime today = TodayDate();
    if (today != g_lastDay) {
-      // Update streak counter from yesterday's result before resetting
-      if (g_lastDay != 0)
-         UpdateConsecLosses();
       g_lastDay = today;
       CloseAll();
       ResetDayState();
-      Print("New day: ", TimeToString(today),
-            (maxConsecLosses > 0 ? StringFormat(" | streak=%d", g_consecLosses) : ""));
+      Print("New day: ", TimeToString(today));
    }
+
+   // ── Heartbeat ──────────────────────────────────────────────────────────
+   PrintHeartbeat(nowHM, rangeStartHM, rangeEndHM, eodHM);
 
    // ── EOD ────────────────────────────────────────────────────────────────
    if (nowHM >= eodHM) {
@@ -560,16 +457,8 @@ void OnTick() {
       return;
    }
 
-   // ── Phase 2: Run filters, then place orders ────────────────────────────
-   if (!g_ordersPlaced && !g_traded && !g_skipDay) {
-      double rangeSize = g_orHigh - g_orLow;
-
-      // Filters run once when range is ready, before placing orders
-      if (!PassesDDFilter() || !PassesConsecFilter() || !PassesATRFilter(rangeSize)) {
-         g_skipDay      = true;
-         g_ordersPlaced = true;   // prevent re-check every tick
-         return;
-      }
+   // ── Phase 2: Place orders ──────────────────────────────────────────────
+   if (!g_ordersPlaced && !g_traded) {
       PlaceBreakoutOrders();
    }
 
@@ -595,7 +484,5 @@ void OnTick() {
 
 //────────────────────────────────────────────────────────────────────────────
 void OnDeinit(const int reason) {
-   if (g_atrHandle != INVALID_HANDLE)
-      IndicatorRelease(g_atrHandle);
    Print("Bot stopped, reason=", reason);
 }
