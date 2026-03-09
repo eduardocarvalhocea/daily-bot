@@ -61,6 +61,7 @@ input int    atrFilterPeriod   = 14;        // ATR period (Daily timeframe)
 input double minRangeATRMult   = 0.15;      // Min range = ATR(D1) × this
 input double maxRangeATRMult   = 1.5;       // Max range = ATR(D1) × this
 input int    maxConsecLosses   = 3;         // Pause after N consecutive SL losses (0 = off)
+input int    cooldownDays      = 2;         // Days to skip after streak hit, then resume
 input bool   useDDFilter       = true;      // Circuit breaker on equity drawdown
 input double maxDDPct          = 0.15;      // Max DD from equity peak (0.15 = 15%)
 
@@ -83,6 +84,7 @@ bool     g_beApplied    = false;    // Breakeven already set today
 // Filter state
 int      g_atrHandle    = INVALID_HANDLE;
 int      g_consecLosses = 0;        // Consecutive SL losses (resets on win/BE)
+int      g_cooldownLeft = 0;        // Days remaining in cooldown (0 = active)
 double   g_equityHWM    = 0;        // Equity high-water mark
 bool     g_skipDay      = false;    // Day skipped by a filter
 
@@ -228,13 +230,29 @@ bool PassesATRFilter(double rangeSize) {
 }
 
 //────────────────────────────────────────────────────────────────────────────
-// Consecutive loss filter: pause trading after maxConsecLosses SL hits.
+// Consecutive loss filter with cooldown.
+// After maxConsecLosses SL hits, enter cooldown for cooldownDays.
+// Cooldown counts down each new trading day. When it expires, streak
+// resets to 0 and trading resumes.
 //────────────────────────────────────────────────────────────────────────────
 bool PassesConsecFilter() {
    if (maxConsecLosses <= 0) return true;
+
+   // Currently in cooldown — skip day
+   if (g_cooldownLeft > 0) {
+      Print("FILTER COOLDOWN: ", g_cooldownLeft, " day(s) remaining — skipping");
+      g_cooldownLeft--;
+      // When cooldown expires, reset streak so bot resumes fresh
+      if (g_cooldownLeft == 0)
+         g_consecLosses = 0;
+      return false;
+   }
+
+   // Streak limit reached — start cooldown
    if (g_consecLosses >= maxConsecLosses) {
-      Print("FILTER STREAK: ", g_consecLosses, " consecutive losses (max=",
-            maxConsecLosses, ") — skipping");
+      g_cooldownLeft = cooldownDays;
+      Print("FILTER STREAK: ", g_consecLosses, " consecutive losses — entering ",
+            cooldownDays, " day cooldown");
       return false;
    }
    return true;
@@ -479,7 +497,7 @@ int OnInit() {
          " | BE=", useBreakeven ? StringFormat("ON(buf=%dticks)", beBufTicks) : "OFF",
          " | Trail=", useTrail  ? StringFormat("ON(%.1fx)", trailRangeMult) : "OFF",
          " | Filters: ATR=", useATRFilter ? StringFormat("ON(%.0f-%.0f%% of D1)", minRangeATRMult*100, maxRangeATRMult*100) : "OFF",
-         " ConsecMax=", maxConsecLosses,
+         " Consec=", maxConsecLosses > 0 ? StringFormat("%d(cool=%dd)", maxConsecLosses, cooldownDays) : "OFF",
          " DD=", useDDFilter ? StringFormat("ON(%.0f%%)", maxDDPct*100) : "OFF");
    return INIT_SUCCEEDED;
 }
