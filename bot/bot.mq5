@@ -82,11 +82,12 @@ bool     g_eodDone      = false;
 bool     g_beApplied    = false;    // Breakeven already set today
 
 // Filter state
-int      g_atrHandle    = INVALID_HANDLE;
-int      g_consecLosses = 0;        // Consecutive SL losses (resets on win/BE)
-int      g_cooldownLeft = 0;        // Days remaining in cooldown (0 = active)
-double   g_equityHWM    = 0;        // Equity high-water mark
-bool     g_skipDay      = false;    // Day skipped by a filter
+int      g_atrHandle        = INVALID_HANDLE;
+int      g_consecLosses     = 0;        // Consecutive SL losses (resets on win/BE)
+int      g_cooldownLeft     = 0;        // Days remaining in cooldown (0 = active)
+ulong    g_forgivenTicket   = 0;        // Deals at or before this ticket are ignored by streak counter
+double   g_equityHWM        = 0;        // Equity high-water mark
+bool     g_skipDay          = false;    // Day skipped by a filter
 
 //────────────────────────────────────────────────────────────────────────────
 // Normalize price to instrument tick size.
@@ -188,6 +189,7 @@ void UpdateConsecLosses() {
    for (int i = total - 1; i >= 0; i--) {
       ulong ticket = HistoryDealGetTicket(i);
       if (ticket == 0) continue;
+      if (ticket <= g_forgivenTicket) break;   // cooldown wiped these — stop
       if (HistoryDealGetInteger(ticket, DEAL_MAGIC) != magicNumber) continue;
       if (HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
 
@@ -242,9 +244,17 @@ bool PassesConsecFilter() {
    if (g_cooldownLeft > 0) {
       Print("FILTER COOLDOWN: ", g_cooldownLeft, " day(s) remaining — skipping");
       g_cooldownLeft--;
-      // When cooldown expires, reset streak so bot resumes fresh
-      if (g_cooldownLeft == 0)
+      if (g_cooldownLeft == 0) {
+         // Mark all current deals as forgiven so UpdateConsecLosses
+         // won't re-count them and trigger another cooldown loop
          g_consecLosses = 0;
+         if (HistorySelect(0, TimeCurrent())) {
+            int total = HistoryDealsTotal();
+            if (total > 0)
+               g_forgivenTicket = HistoryDealGetTicket(total - 1);
+         }
+         Print("FILTER COOLDOWN: expired — streak reset, resuming tomorrow");
+      }
       return false;
    }
 
