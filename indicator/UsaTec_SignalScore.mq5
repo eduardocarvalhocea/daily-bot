@@ -173,7 +173,7 @@ int OnCalculate(const int rates_total,
                 const int &spread[])
 {
    int minBars = 55;
-   if(rates_total < minBars) return 0;
+   if(rates_total < minBars) return prev_calculated;
 
    // ── Tentar criar painel (so uma vez) ─────────────────────────
    if(InpPanel && !panelOk)
@@ -185,7 +185,7 @@ int OnCalculate(const int rates_total,
 
    // ── Carregar M30 (pelo numero real de barras M30) ─────────────
    int m30n = iBars(Symbol(), PERIOD_M30);
-   if(m30n < 30) return 0;
+   if(m30n < 30) return prev_calculated;
 
    double m30e21[], m30e50[], m30rsi[];
    ArraySetAsSeries(m30e21,  true);
