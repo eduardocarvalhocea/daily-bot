@@ -86,6 +86,7 @@ int hM30E21, hM30E50, hM30RSI;
 
 bool panelOk = false;
 int  panelWin = -1;
+bool fullCalcDone = false;   // true apos primeira calculacao completa com sucesso
 
 string PFX = "UTSC_";
 
@@ -94,6 +95,8 @@ string PFX = "UTSC_";
 //==================================================================
 int OnInit()
 {
+   fullCalcDone = false;
+
    if(Period() != PERIOD_M5)
    { Alert("Aplicar no M5!"); return INIT_FAILED; }
 
@@ -184,16 +187,21 @@ int OnCalculate(const int rates_total,
    }
 
    // ── Carregar M30 (pelo numero real de barras M30) ─────────────
+   // Se dados M30 nao estao prontos e ja calculamos antes, preservar buffers
    int m30n = iBars(Symbol(), PERIOD_M30);
-   if(m30n < 30) return prev_calculated;
+   if(m30n < 30)
+   { if(fullCalcDone) return rates_total; return prev_calculated; }
 
    double m30e21[], m30e50[], m30rsi[];
    ArraySetAsSeries(m30e21,  true);
    ArraySetAsSeries(m30e50,  true);
    ArraySetAsSeries(m30rsi,  true);
-   if(CopyBuffer(hM30E21, 0, 0, m30n, m30e21)  != m30n) return prev_calculated;
-   if(CopyBuffer(hM30E50, 0, 0, m30n, m30e50)  != m30n) return prev_calculated;
-   if(CopyBuffer(hM30RSI, 0, 0, m30n, m30rsi)  != m30n) return prev_calculated;
+   if(CopyBuffer(hM30E21, 0, 0, m30n, m30e21)  != m30n)
+   { if(fullCalcDone) return rates_total; return prev_calculated; }
+   if(CopyBuffer(hM30E50, 0, 0, m30n, m30e50)  != m30n)
+   { if(fullCalcDone) return rates_total; return prev_calculated; }
+   if(CopyBuffer(hM30RSI, 0, 0, m30n, m30rsi)  != m30n)
+   { if(fullCalcDone) return rates_total; return prev_calculated; }
 
    // ── Carregar M5 (como serie: indice 0 = mais recente) ─────────
    double ae9[], ae21[], ae50[], arsi[], aatr[];
@@ -237,6 +245,8 @@ int OnCalculate(const int rates_total,
    double pMe21=0,pMe50=0,pMrsi=0,pE9=0,pE21=0,pCl=0,pOp=0,pRsi=0,pVwap=0,pNet=0;
    bool   pFL=false,pFS=false;
 
+   int lastGoodM30 = -1;   // fallback para iBarShift
+
    for(int i=start; i<rates_total; i++)
    {
       // Indice no array serie para esta barra M5
@@ -244,13 +254,13 @@ int OnCalculate(const int rates_total,
       int si1 = si + 1;                 // barra anterior
       int si2 = si + 2;                 // penultima
 
-      if(si2 >= rates_total) { Sc[i]=0; ScClr[i]=2; continue; }
+      if(si2 >= rates_total) continue;  // preserva valor anterior do buffer
 
       // Dados M5 (valores ja calculados para barra fechada i-1)
       // OHLC da barra anterior: indice i-1 no array nao-serie
       int  ip  = i-1;
       int  ip2 = i-2;
-      if(ip < 0)  { Sc[i]=0; ScClr[i]=2; continue; }
+      if(ip < 0) continue;
 
       double cl  = close[ip];
       double op  = open [ip];
@@ -271,12 +281,17 @@ int OnCalculate(const int rates_total,
       // Buscar barra M30 correspondente a esta barra M5
       // iBarShift retorna indice no PERIOD_M30 (0 = barra M30 mais recente)
       int m30i = iBarShift(Symbol(), PERIOD_M30, time[i], false);
-      if(m30i < 0 || m30i >= m30n) { Sc[i]=0; ScClr[i]=2; continue; }
+      if(m30i < 0 || m30i >= m30n)
+      {
+         if(lastGoodM30 >= 0) m30i = lastGoodM30;  // usa ultimo M30 valido
+         else continue;                              // sem fallback, pula sem zerar
+      }
+      else lastGoodM30 = m30i;
 
       double me21v = m30e21[m30i];
       double me50v = m30e50[m30i];
       double mrsiv = m30rsi[m30i];
-      if(me21v == 0 || me50v == 0) { Sc[i]=0; ScClr[i]=2; continue; }
+      if(me21v == 0 || me50v == 0) continue;  // pula sem zerar
 
       // ── Condicoes binarias ─────────────────────────────────────
       bool trend_bull = me21v > me50v;
@@ -377,6 +392,8 @@ int OnCalculate(const int rates_total,
          pE9=e9v; pE21=e21v; pCl=cl; pOp=op; pRsi=rsiv; pVwap=vwap; pNet=net;
       }
    }
+
+   fullCalcDone = true;
 
    // Atualizar painel
    if(InpPanel && panelOk)
