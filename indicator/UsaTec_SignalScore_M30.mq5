@@ -86,6 +86,7 @@ int hH4E21, hH4E50, hH4RSI;
 
 bool panelOk = false;
 int  panelWin = -1;
+bool fullCalcDone = false;   // true apos primeira calculacao completa com sucesso
 
 string PFX = "UTSC30_";
 
@@ -94,6 +95,8 @@ string PFX = "UTSC30_";
 //==================================================================
 int OnInit()
 {
+   fullCalcDone = false;
+
    if(Period() != PERIOD_M30)
    { Alert("Aplicar no M30!"); return INIT_FAILED; }
 
@@ -173,7 +176,7 @@ int OnCalculate(const int rates_total,
                 const int &spread[])
 {
    int minBars = 55;
-   if(rates_total < minBars) return 0;
+   if(rates_total < minBars) return prev_calculated;
 
    // ── Tentar criar painel (so uma vez) ─────────────────────────
    if(InpPanel && !panelOk)
@@ -188,7 +191,8 @@ int OnCalculate(const int rates_total,
    // Precisamos cobrir rates_total barras M30, entao h4 need = rates_total/8 + margem
    int h4need = rates_total / 8 + 60;
    int h4avail = iBars(Symbol(), PERIOD_H4);
-   if(h4avail < 55) return 0;
+   if(h4avail < 55)
+   { if(fullCalcDone) return rates_total; return prev_calculated; }
    int h4n = MathMin(h4need, h4avail);
 
    double h4e21[], h4e50[], h4rsi[];
@@ -198,7 +202,8 @@ int OnCalculate(const int rates_total,
    int c1 = CopyBuffer(hH4E21, 0, 0, h4n, h4e21);
    int c2 = CopyBuffer(hH4E50, 0, 0, h4n, h4e50);
    int c3 = CopyBuffer(hH4RSI, 0, 0, h4n, h4rsi);
-   if(c1 <= 0 || c2 <= 0 || c3 <= 0) return prev_calculated;
+   if(c1 <= 0 || c2 <= 0 || c3 <= 0)
+   { if(fullCalcDone) return rates_total; return prev_calculated; }
    // Usar o menor tamanho efetivamente copiado
    h4n = MathMin(c1, MathMin(c2, c3));
 
@@ -237,6 +242,8 @@ int OnCalculate(const int rates_total,
    double pHe21=0,pHe50=0,pHrsi=0,pE9=0,pE21=0,pCl=0,pOp=0,pRsi=0,pVwap=0,pNet=0;
    bool   pFL=false,pFS=false;
 
+   int lastGoodH4 = -1;   // fallback para iBarShift
+
    for(int i=start; i<rates_total; i++)
    {
       // Indice no array serie para esta barra M30
@@ -244,12 +251,12 @@ int OnCalculate(const int rates_total,
       int si1 = si + 1;
       int si2 = si + 2;
 
-      if(si2 >= rates_total) { Sc[i]=0; ScClr[i]=2; continue; }
+      if(si2 >= rates_total) continue;  // preserva valor anterior do buffer
 
       // Dados M30 (valores da barra fechada i-1)
       int  ip  = i-1;
       int  ip2 = i-2;
-      if(ip < 0)  { Sc[i]=0; ScClr[i]=2; continue; }
+      if(ip < 0) continue;
 
       double cl  = close[ip];
       double op  = open [ip];
@@ -270,12 +277,17 @@ int OnCalculate(const int rates_total,
       // Buscar barra H4 correspondente a esta barra M30
       // iBarShift retorna indice no PERIOD_H4 (0 = barra H4 mais recente)
       int h4i = iBarShift(Symbol(), PERIOD_H4, time[i], false);
-      if(h4i < 0 || h4i >= h4n-1) { Sc[i]=0; ScClr[i]=2; continue; }
+      if(h4i < 0 || h4i >= h4n-1)
+      {
+         if(lastGoodH4 >= 0) h4i = lastGoodH4;  // usa ultimo H4 valido
+         else continue;                           // sem fallback, pula sem zerar
+      }
+      else lastGoodH4 = h4i;
 
       double he21v = h4e21[h4i];
       double he50v = h4e50[h4i];
       double hrsiv = h4rsi[h4i];
-      if(he21v == 0 || he50v == 0) { Sc[i]=0; ScClr[i]=2; continue; }
+      if(he21v == 0 || he50v == 0) continue;  // pula sem zerar
 
       // ── Condicoes binarias ─────────────────────────────────────
       bool trend_bull = he21v > he50v;
@@ -376,6 +388,8 @@ int OnCalculate(const int rates_total,
          pE9=e9v; pE21=e21v; pCl=cl; pOp=op; pRsi=rsiv; pVwap=vwap; pNet=net;
       }
    }
+
+   fullCalcDone = true;
 
    // Atualizar painel
    if(InpPanel && panelOk)
